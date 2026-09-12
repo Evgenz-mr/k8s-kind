@@ -20,7 +20,6 @@ jobs:
         run: |
           kubectl -n vault exec vault-0 -- sh -c 'VAULT_TOKEN=root vault auth enable kubernetes'
           kubectl -n vault exec vault-0 -- sh -c 'VAULT_TOKEN=root vault write auth/kubernetes/config kubernetes_host=https://kubernetes.default.svc:443'
-          kubectl -n vault exec vault-0 -- sh -c 'VAULT_TOKEN=root vault secrets enable -path=secret kv-v2'
           kubectl -n vault exec vault-0 -- sh -c 'VAULT_TOKEN=root vault kv put secret/e2e message=works'
           kubectl -n vault exec vault-0 -- sh -c "VAULT_TOKEN=root vault policy write e2e - <<'EOF'
           path \"secret/data/e2e\" { capabilities = [\"read\"] }
