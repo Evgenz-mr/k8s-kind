@@ -8,7 +8,8 @@ param(
     [ValidatePattern('^[a-z0-9-]+$')]
     [string]$Cluster = 'ai-k8s',
 
-    [string]$Username = 'admin'
+    [string]$Username = 'admin',
+    [string]$Password = 'admin'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -27,19 +28,13 @@ helm repo update
 helm upgrade --install headlamp headlamp/headlamp --kube-context $context --namespace headlamp --create-namespace
 if ($LASTEXITCODE -ne 0) { throw 'Headlamp installation failed.' }
 
-# Create a lab administrator identity for Headlamp's Kubernetes/RBAC login.
+# LAB ONLY: this identity intentionally has full cluster-admin rights.
 kubectl --context $context -n headlamp create serviceaccount headlamp-admin --dry-run=client -o yaml | kubectl --context $context apply -f -
 kubectl --context $context create clusterrolebinding headlamp-admin --clusterrole=cluster-admin --serviceaccount=headlamp:headlamp-admin --dry-run=client -o yaml | kubectl --context $context apply -f -
-$token = kubectl --context $context -n headlamp create token headlamp-admin --duration=24h
-
-# Generate an ingress-level password. It is never written to Git.
-$chars = 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#$%'
-$password = -join (1..20 | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
 
 if ($Ingress -eq 'nginx') {
-    # Generate an htpasswd-compatible bcrypt entry using a temporary container.
-    if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { throw "Docker is required to generate the Basic Auth secret." }
-    $authLine = docker run --rm httpd:2.4-alpine htpasswd -nbB $Username $password
+    if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { throw 'Docker is required to generate the Basic Auth secret.' }
+    $authLine = docker run --rm httpd:2.4-alpine htpasswd -nbB $Username $Password
     if ($LASTEXITCODE -ne 0) { throw 'Could not generate Basic Auth credentials.' }
     $authFile = Join-Path $env:TEMP "headlamp-auth-$PID"
     [System.IO.File]::WriteAllText($authFile, "$authLine`n", [System.Text.UTF8Encoding]::new($false))
@@ -71,18 +66,15 @@ spec:
                   number: 80
 "@ | kubectl --context $context apply -f -
 } else {
-    Write-Warning 'Headlamp was installed, but automatic username/password protection is currently implemented for NGINX Ingress only. Use the Headlamp Kubernetes token or add HAProxy authentication configuration.'
+    Write-Warning 'Headlamp is installed. Automatic Basic Auth is currently configured for NGINX Ingress only.'
 }
 
 Write-Host ''
-Write-Host 'Headlamp installed.'
-Write-Host "URL host: dashboard.local"
+Write-Host 'Headlamp installed for the LOCAL LAB.'
+Write-Host 'URL host: dashboard.local'
 if ($Ingress -eq 'nginx') {
-    Write-Host "Ingress login: $Username"
-    Write-Host "Ingress password: $password"
+    Write-Host "Login: $Username"
+    Write-Host "Password: $Password"
 }
-Write-Host ''
-Write-Host 'Headlamp Kubernetes login token (valid for 24h):'
-Write-Host $token
-Write-Host ''
-Write-Warning 'Save the credentials now. The generated password is not committed to Git.'
+Write-Host 'RBAC: headlamp-admin is bound to cluster-admin (FULL RIGHTS).'
+Write-Warning 'admin/admin and cluster-admin are intentionally insecure and must only be used in this disposable local lab.'
