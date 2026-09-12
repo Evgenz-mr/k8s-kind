@@ -64,6 +64,12 @@ if [[ "$VAULT" == enabled ]];then
     if [[ "$i" -eq 60 ]]; then echo 'Vault StatefulSet was not created within 120s' >&2; kubectl --context "$CTX" -n vault get all || true; exit 1; fi
     sleep 2
   done
+  echo 'Waiting for vault-0 pod to be created...'
+  for i in {1..60}; do
+    kubectl --context "$CTX" -n vault get pod/vault-0 >/dev/null 2>&1 && break
+    if [[ "$i" -eq 60 ]]; then echo 'vault-0 pod was not created within 120s' >&2; kubectl --context "$CTX" -n vault get all || true; exit 1; fi
+    sleep 2
+  done
   kubectl --context "$CTX" -n vault wait --for=condition=Ready pod/vault-0 --timeout=300s
   kubectl --context "$CTX" -n vault rollout status deployment/vault-agent-injector --timeout=300s
 fi
