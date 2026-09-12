@@ -1,0 +1,61 @@
+name: e2e
+on:
+  push:
+    branches: [stabilize-e2e, main]
+  pull_request:
+    branches: [main]
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install kind
+        run: |
+          curl -fsSLo /tmp/kind https://kind.sigs.k8s.io/dl/v0.32.0/kind-linux-amd64
+          chmod +x /tmp/kind
+          sudo mv /tmp/kind /usr/local/bin/kind
+          kind version
+          kubectl version --client
+          helm version
+      - name: Create core lab
+        run: ./scripts/create.sh --workers 1 --ingress nginx --dashboard none --metrics enabled --postgres enabled --mongodb enabled --redis enabled --kafka enabled --minio enabled
+      - name: Functional checks
+        run: |
+          kubectl -n database exec deploy/postgres -- sh -c 'pg_isready -U app -d appdb'
+          kubectl -n database exec deploy/mongodb -- mongosh --quiet --eval "db.adminCommand('ping').ok"
+          kubectl -n data exec deploy/redis -- redis-cli ping
+          kubectl -n data exec deploy/kafka -- /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka.data.svc.cluster.local:9092 --create --if-not-exists --topic e2e --partitions 1 --replication-factor 1
+          kubectl -n data exec deploy/kafka -- /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka.data.svc.cluster.local:9092 --describe --topic e2e
+          kubectl -n data run minio-check --image=curlimages/curl:8.16.0 --restart=Never --rm -i -- curl -fsS http://minio:9000/minio/health/ready
+      - name: Diagnostics
+        if: always()
+        run: |
+          kubectl get nodes -o wide || true
+          kubectl get pods -A -o wide || true
+          kubectl get events -A --sort-by='.lastTimestamp' || true
+          kubectl -n ingress-nginx describe pods || true
+  cilium:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install kind
+        run: |
+          curl -fsSLo /tmp/kind https://kind.sigs.k8s.io/dl/v0.32.0/kind-linux-amd64
+          chmod +x /tmp/kind
+          sudo mv /tmp/kind /usr/local/bin/kind
+      - name: Create Cilium lab
+        run: ./scripts/create.sh --workers 1 --network cilium --ingress none --dashboard none
+      - name: Network smoke
+        run: |
+          kubectl run net-a --image=nginx:alpine
+          kubectl wait --for=condition=Ready pod/net-a --timeout=120s
+          kubectl expose pod net-a --port=80
+          kubectl run net-b --image=curlimages/curl:8.16.0 --restart=Never --rm -i -- curl -fsS http://net-a
+      - name: Diagnostics
+        if: always()
+        run: |
+          kubectl get nodes -o wide || true
+          kubectl get pods -A -o wide || true
+          kubectl get events -A --sort-by='.lastTimestamp' || true
