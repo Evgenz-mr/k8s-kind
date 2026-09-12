@@ -20,7 +20,19 @@ if [[ "$INGRESS" != none ]];then
     helm repo add haproxytech https://haproxytech.github.io/helm-charts --force-update;helm repo update;helm upgrade --install haproxy-kubernetes-ingress haproxytech/kubernetes-ingress --kube-context "$CTX" -n haproxy-controller --create-namespace --set controller.hostNetwork=true --set-string controller.nodeSelector.ingress-ready=true;kubectl --context "$CTX" -n haproxy-controller rollout status deploy/haproxy-kubernetes-ingress --timeout=300s
   fi
 fi
-if [[ "$CERT_MANAGER" == enabled ]];then helm upgrade --install cert-manager oci://quay.io/jetstack/charts/cert-manager --kube-context "$CTX" -n cert-manager --create-namespace --set crds.enabled=true;kubectl --context "$CTX" -n cert-manager rollout status deploy/cert-manager --timeout=300s;fi
+if [[ "$CERT_MANAGER" == enabled ]];then
+  helm upgrade --install cert-manager oci://quay.io/jetstack/charts/cert-manager --kube-context "$CTX" -n cert-manager --create-namespace --set crds.enabled=true
+  kubectl --context "$CTX" -n cert-manager rollout status deploy/cert-manager --timeout=300s
+  kubectl --context "$CTX" wait --for=condition=Established crd/clusterissuers.cert-manager.io --timeout=120s
+  cat <<'YAML' | kubectl --context "$CTX" apply -f -
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: lab-selfsigned
+spec:
+  selfSigned: {}
+YAML
+fi
 if [[ "$METRICS" == enabled ]];then helm repo add metrics-server https://kubernetes-sigs.github.io/metrics-server/ --force-update;helm repo update;helm upgrade --install metrics-server metrics-server/metrics-server --kube-context "$CTX" -n kube-system --set 'args={--kubelet-insecure-tls,--kubelet-preferred-address-types=InternalIP}' ;kubectl --context "$CTX" -n kube-system rollout status deploy/metrics-server --timeout=300s;fi
 if [[ "$MONITORING" == enabled ]];then helm repo add prometheus-community https://prometheus-community.github.io/helm-charts --force-update;helm repo update;helm upgrade --install monitoring prometheus-community/kube-prometheus-stack --kube-context "$CTX" -n monitoring --create-namespace --set grafana.adminUser=admin --set grafana.adminPassword=admin;kubectl --context "$CTX" -n monitoring rollout status deploy/monitoring-grafana --timeout=300s;fi
 if [[ "$LOGGING" == loki ]];then helm repo add grafana-community https://grafana-community.github.io/helm-charts --force-update;helm repo add grafana https://grafana.github.io/helm-charts --force-update;helm repo update;LV=$(mktemp);cat >"$LV" <<'YAML'
