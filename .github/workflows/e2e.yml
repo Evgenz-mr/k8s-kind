@@ -30,7 +30,11 @@ jobs:
           kubectl -n data run minio-check --image=curlimages/curl:8.16.0 --restart=Never --rm -i -- curl -fsS http://minio:9000/minio/health/ready
       - name: Diagnostics
         if: always()
-        run: kubectl get pods -A -o wide || true
+        run: |
+          kubectl get nodes -o wide || true
+          kubectl get pods -A -o wide || true
+          kubectl get events -A --sort-by='.lastTimestamp' || true
+          kubectl -n ingress-nginx describe pods || true
   cilium:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -51,4 +55,7 @@ jobs:
           kubectl run net-b --image=curlimages/curl:8.16.0 --restart=Never --rm -i -- curl -fsS http://net-a
       - name: Diagnostics
         if: always()
-        run: kubectl get pods -A -o wide || true
+        run: |
+          kubectl get nodes -o wide || true
+          kubectl get pods -A -o wide || true
+          kubectl get events -A --sort-by='.lastTimestamp' || true
