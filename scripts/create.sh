@@ -54,7 +54,20 @@ chunksCache: {enabled: false}
 resultsCache: {enabled: false}
 YAML
 helm upgrade --install loki grafana-community/loki --kube-context "$CTX" -n logging --create-namespace -f "$LV";rm -f "$LV";kubectl --context "$CTX" -n logging rollout status statefulset/loki --timeout=300s;fi
-if [[ "$VAULT" == enabled ]];then helm repo add hashicorp https://helm.releases.hashicorp.com --force-update;helm repo update;helm upgrade --install vault hashicorp/vault --kube-context "$CTX" -n vault --create-namespace --set server.dev.enabled=true --set server.dev.devRootToken=root --set injector.enabled=true;kubectl --context "$CTX" -n vault wait --for=condition=Ready pod/vault-0 --timeout=300s;fi
+if [[ "$VAULT" == enabled ]];then
+  helm repo add hashicorp https://helm.releases.hashicorp.com --force-update
+  helm repo update
+  helm upgrade --install vault hashicorp/vault --kube-context "$CTX" -n vault --create-namespace --set server.dev.enabled=true --set server.dev.devRootToken=root --set injector.enabled=true
+  echo 'Waiting for Vault StatefulSet to be created...'
+  for i in {1..60}; do
+    kubectl --context "$CTX" -n vault get statefulset/vault >/dev/null 2>&1 && break
+    if [[ "$i" -eq 60 ]]; then echo 'Vault StatefulSet was not created within 120s' >&2; kubectl --context "$CTX" -n vault get all || true; exit 1; fi
+    sleep 2
+  done
+  kubectl --context "$CTX" -n vault rollout status statefulset/vault --timeout=300s
+  kubectl --context "$CTX" -n vault wait --for=condition=Ready pod/vault-0 --timeout=300s
+  kubectl --context "$CTX" -n vault rollout status deployment/vault-agent-injector --timeout=300s
+fi
 [[ "$POSTGRES" == enabled ]]&&{ kubectl --context "$CTX" apply -f "$ROOT/components/postgres.yaml";kubectl --context "$CTX" -n database rollout status deploy/postgres --timeout=300s;};[[ "$MONGODB" == enabled ]]&&{ kubectl --context "$CTX" apply -f "$ROOT/components/mongodb.yaml";kubectl --context "$CTX" -n database rollout status deploy/mongodb --timeout=300s;};[[ "$REDIS" == enabled ]]&&{ kubectl --context "$CTX" apply -f "$ROOT/components/redis.yaml";kubectl --context "$CTX" -n data rollout status deploy/redis --timeout=300s;};[[ "$KAFKA" == enabled ]]&&{ kubectl --context "$CTX" apply -f "$ROOT/components/kafka.yaml";kubectl --context "$CTX" -n data rollout status deploy/kafka --timeout=300s;};[[ "$MINIO" == enabled ]]&&{ kubectl --context "$CTX" apply -f "$ROOT/components/minio.yaml";kubectl --context "$CTX" -n data rollout status deploy/minio --timeout=300s;}
 if [[ "$KYVERNO" == enabled ]];then helm repo add kyverno https://kyverno.github.io/kyverno/ --force-update;helm repo update;helm upgrade --install kyverno kyverno/kyverno --kube-context "$CTX" -n kyverno --create-namespace;kubectl --context "$CTX" -n kyverno rollout status deploy/kyverno-admission-controller --timeout=300s;fi
 CLASS="$INGRESS"
