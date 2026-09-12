@@ -1,0 +1,34 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: ai-creative-frontend
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Evgenz-mr/ai-creative-frontend.git
+    targetRevision: main
+    path: helm
+    helm:
+      releaseName: ai-creative-frontend
+      values: |
+        image:
+          repository: ghcr.io/evgenz-mr/ai-creative-frontend
+          tag: latest
+          pullPolicy: Always
+        ingress:
+          enabled: true
+          className: nginx
+          host: ai-creative.local
+          path: /
+        config:
+          apiUrl: "http://ai-creative-backend:8080"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: ai-creative
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
