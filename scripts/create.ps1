@@ -35,7 +35,6 @@ if($Metrics-eq'enabled'){& (Join-Path $PSScriptRoot 'install-metrics.ps1') -Clus
 if($Monitoring-eq'enabled'){& (Join-Path $PSScriptRoot 'install-monitoring.ps1') -Cluster $Name -Ingress $Ingress}
 if($Logging-eq'loki'){& (Join-Path $PSScriptRoot 'install-logging.ps1') -Cluster $Name}
 if($Vault-eq'enabled'){& (Join-Path $PSScriptRoot 'install-vault.ps1') -Cluster $Name}
-if($Redis-eq'enabled'-or $Kafka-eq'enabled'-or $MinIO-eq'enabled'-or $Kyverno-eq'enabled'){}
 if($Redis-eq'enabled -or $Kafka-eq'enabled -or $MinIO-eq'enabled -or $Kyverno-eq'enabled){& (Join-Path $PSScriptRoot 'install-extras.ps1') -Cluster $Name -Redis $Redis -Kafka $Kafka -MinIO $MinIO -Kyverno $Kyverno}
 if($Dashboard-eq'headlamp'){& (Join-Path $PSScriptRoot 'install-dashboard.ps1') -Dashboard headlamp -Ingress $Ingress -Cluster $Name -Username admin -Password admin}
 if($ArgoCD-eq'enabled'){& (Join-Path $PSScriptRoot 'install-argocd.ps1') -Cluster $Name -Ingress $Ingress -Username admin -Password admin}
