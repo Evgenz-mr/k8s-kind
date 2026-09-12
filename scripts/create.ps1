@@ -9,7 +9,10 @@ param(
     [string]$Ingress = 'nginx',
 
     [ValidateSet('headlamp', 'none')]
-    [string]$Dashboard = 'headlamp'
+    [string]$Dashboard = 'headlamp',
+
+    [ValidateSet('enabled', 'disabled')]
+    [string]$ArgoCD = 'disabled'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -17,8 +20,11 @@ $ErrorActionPreference = 'Stop'
 foreach ($cmd in @('docker', 'kind', 'kubectl')) {
     if (-not (Get-Command $cmd -ErrorAction SilentlyContinue)) { throw "Required command '$cmd' was not found in PATH." }
 }
-if (($Ingress -ne 'none' -or $Dashboard -ne 'none') -and -not (Get-Command helm -ErrorAction SilentlyContinue)) {
-    throw "Helm is required when Ingress or Dashboard installation is enabled."
+if (($Ingress -ne 'none' -or $Dashboard -ne 'none' -or $ArgoCD -eq 'enabled') -and -not (Get-Command helm -ErrorAction SilentlyContinue)) {
+    throw 'Helm is required for the selected lab components.'
+}
+if (($Dashboard -eq 'headlamp' -or $ArgoCD -eq 'enabled') -and $Ingress -eq 'none') {
+    throw 'Dashboard and Argo CD require an Ingress controller in this lab configuration.'
 }
 
 docker info *> $null
@@ -44,13 +50,15 @@ kubectl --context "kind-$Name" get nodes -o wide
 
 if ($Ingress -ne 'none') {
     & (Join-Path $PSScriptRoot 'install-ingress.ps1') -Controller $Ingress -Cluster $Name
-    if ($LASTEXITCODE -ne 0) { throw 'Ingress installation failed.' }
 }
-
 if ($Dashboard -eq 'headlamp') {
-    if ($Ingress -eq 'none') { throw 'Headlamp dashboard requires an Ingress controller in this lab configuration.' }
-    & (Join-Path $PSScriptRoot 'install-dashboard.ps1') -Dashboard headlamp -Ingress $Ingress -Cluster $Name
-    if ($LASTEXITCODE -ne 0) { throw 'Dashboard installation failed.' }
+    & (Join-Path $PSScriptRoot 'install-dashboard.ps1') -Dashboard headlamp -Ingress $Ingress -Cluster $Name -Username admin -Password admin
+}
+if ($ArgoCD -eq 'enabled') {
+    & (Join-Path $PSScriptRoot 'install-argocd.ps1') -Cluster $Name -Ingress $Ingress -Username admin -Password admin
 }
 
+Write-Host ''
 Write-Host "Cluster '$Name' is ready."
+if ($Dashboard -eq 'headlamp') { Write-Host 'Dashboard: dashboard.local  admin/admin' }
+if ($ArgoCD -eq 'enabled') { Write-Host 'Argo CD:   argocd.local     admin/admin' }
