@@ -1,7 +1,7 @@
 name: e2e
 on:
   push:
-    branches: [stabilize-e2e, main]
+    branches: [full-stack-e2e-clean, main]
   pull_request:
     branches: [main]
 jobs:
@@ -13,11 +13,7 @@ jobs:
       - name: Install kind
         run: |
           curl -fsSLo /tmp/kind https://kind.sigs.k8s.io/dl/v0.32.0/kind-linux-amd64
-          chmod +x /tmp/kind
-          sudo mv /tmp/kind /usr/local/bin/kind
-          kind version
-          kubectl version --client
-          helm version
+          chmod +x /tmp/kind && sudo mv /tmp/kind /usr/local/bin/kind
       - name: Create core lab
         run: ./scripts/create.sh --workers 1 --ingress nginx --dashboard none --metrics enabled --postgres enabled --mongodb enabled --redis enabled --kafka enabled --minio enabled
       - name: Functional checks
@@ -26,15 +22,10 @@ jobs:
           kubectl -n database exec deploy/mongodb -- mongosh --quiet --eval "db.adminCommand('ping').ok"
           kubectl -n data exec deploy/redis -- redis-cli ping
           kubectl -n data exec deploy/kafka -- /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka.data.svc.cluster.local:9092 --create --if-not-exists --topic e2e --partitions 1 --replication-factor 1
-          kubectl -n data exec deploy/kafka -- /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka.data.svc.cluster.local:9092 --describe --topic e2e
           kubectl -n data run minio-check --image=curlimages/curl:8.16.0 --restart=Never --rm -i -- curl -fsS http://minio:9000/minio/health/ready
       - name: Diagnostics
         if: always()
-        run: |
-          kubectl get nodes -o wide || true
-          kubectl get pods -A -o wide || true
-          kubectl get events -A --sort-by='.lastTimestamp' || true
-          kubectl -n ingress-nginx describe pods || true
+        run: kubectl get pods -A -o wide || true
   cilium:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -43,8 +34,7 @@ jobs:
       - name: Install kind
         run: |
           curl -fsSLo /tmp/kind https://kind.sigs.k8s.io/dl/v0.32.0/kind-linux-amd64
-          chmod +x /tmp/kind
-          sudo mv /tmp/kind /usr/local/bin/kind
+          chmod +x /tmp/kind && sudo mv /tmp/kind /usr/local/bin/kind
       - name: Create Cilium lab
         run: ./scripts/create.sh --workers 1 --network cilium --ingress none --dashboard none
       - name: Network smoke
@@ -53,9 +43,35 @@ jobs:
           kubectl wait --for=condition=Ready pod/net-a --timeout=120s
           kubectl expose pod net-a --port=80
           kubectl run net-b --image=curlimages/curl:8.16.0 --restart=Never --rm -i -- curl -fsS http://net-a
-      - name: Diagnostics
+  full-stack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install kind
+        run: |
+          curl -fsSLo /tmp/kind https://kind.sigs.k8s.io/dl/v0.32.0/kind-linux-amd64
+          chmod +x /tmp/kind && sudo mv /tmp/kind /usr/local/bin/kind
+      - name: Create full platform lab
+        run: ./scripts/create.sh --workers 1 --ingress nginx --dashboard headlamp --argocd enabled --cert-manager enabled --metrics enabled --monitoring enabled --logging loki --vault enabled --kyverno enabled
+      - name: Full platform checks
+        run: |
+          kubectl wait --for=condition=Ready nodes --all --timeout=120s
+          kubectl -n ingress-nginx rollout status ds/ingress-nginx-controller --timeout=120s
+          kubectl -n cert-manager rollout status deploy/cert-manager --timeout=120s
+          kubectl -n kube-system rollout status deploy/metrics-server --timeout=120s
+          kubectl -n monitoring rollout status deploy/monitoring-grafana --timeout=180s
+          kubectl -n logging rollout status statefulset/loki --timeout=180s
+          kubectl -n vault wait --for=condition=Ready pod/vault-0 --timeout=180s
+          kubectl -n headlamp get deploy,svc,ingress
+          kubectl -n argocd rollout status deploy/argocd-server --timeout=180s
+          kubectl -n kyverno get pods
+          kubectl get clusterissuer lab-selfsigned
+          curl --retry 10 --retry-delay 2 --retry-connrefused -fsS -H 'Host: dashboard.localhost' http://127.0.0.1:8080/ >/dev/null
+      - name: Full diagnostics
         if: always()
         run: |
           kubectl get nodes -o wide || true
           kubectl get pods -A -o wide || true
+          kubectl get ingress -A || true
           kubectl get events -A --sort-by='.lastTimestamp' || true

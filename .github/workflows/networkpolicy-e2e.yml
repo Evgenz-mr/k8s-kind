@@ -1,0 +1,33 @@
+name: networkpolicy-e2e
+on:
+  push:
+    branches: [full-stack-e2e-clean, main]
+  pull_request:
+    branches: [main]
+jobs:
+  cilium-networkpolicy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install kind
+        run: |
+          curl -fsSLo /tmp/kind https://kind.sigs.k8s.io/dl/v0.32.0/kind-linux-amd64
+          chmod +x /tmp/kind && sudo mv /tmp/kind /usr/local/bin/kind
+      - name: Create Cilium cluster
+        run: ./scripts/create.sh --workers 1 --network cilium --ingress none --dashboard none
+      - name: Verify NetworkPolicy enforcement
+        run: |
+          kubectl apply -f components/networkpolicy-test.yaml
+          kubectl -n network-test wait --for=condition=Ready pod/server --timeout=120s
+          kubectl -n network-test run allowed --labels=access=allowed --image=curlimages/curl:8.16.0 --restart=Never --rm -i -- curl --connect-timeout 5 -fsS http://server
+          if kubectl -n network-test run denied --image=curlimages/curl:8.16.0 --restart=Never --rm -i -- curl --connect-timeout 5 -fsS http://server; then
+            echo 'ERROR: denied pod reached protected service'
+            exit 1
+          fi
+      - name: Diagnostics
+        if: always()
+        run: |
+          kubectl get pods -A -o wide || true
+          kubectl get networkpolicy -A || true
+          kubectl get events -A --sort-by='.lastTimestamp' || true
