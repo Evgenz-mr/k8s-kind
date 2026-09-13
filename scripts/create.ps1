@@ -24,8 +24,20 @@ foreach ($cmd in @('docker','kind','kubectl','helm')) {
     if (-not (Get-Command $cmd -ErrorAction SilentlyContinue)) { throw "Required command '$cmd' was not found in PATH." }
 }
 
-docker info *> $null
-if ($LASTEXITCODE -ne 0) { throw 'Docker engine is not running.' }
+# Windows PowerShell 5.1 can promote native stderr output to NativeCommandError
+# when ErrorActionPreference is Stop. Docker may emit harmless daemon warnings
+# (for example about seccomp) on stderr even when `docker info` succeeds.
+$previousErrorActionPreference = $ErrorActionPreference
+try {
+    $ErrorActionPreference = 'Continue'
+    docker info 1>$null 2>$null
+    $dockerExitCode = $LASTEXITCODE
+}
+finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+}
+if ($dockerExitCode -ne 0) { throw 'Docker engine is not running or is not responding.' }
+
 if ((kind get clusters) -contains $Name) { throw "Kind cluster '$Name' already exists." }
 if (($Dashboard -eq 'headlamp' -or $ArgoCD -eq 'enabled' -or $Monitoring -eq 'enabled') -and $Ingress -eq 'none') { throw 'Dashboard, Argo CD and Monitoring require Ingress.' }
 
