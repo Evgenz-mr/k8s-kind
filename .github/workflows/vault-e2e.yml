@@ -1,0 +1,54 @@
+name: vault-e2e
+on:
+  push:
+    branches: [full-stack-e2e-clean, main]
+  pull_request:
+    branches: [main]
+jobs:
+  vault-injector:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install kind
+        run: |
+          curl -fsSLo /tmp/kind https://kind.sigs.k8s.io/dl/v0.32.0/kind-linux-amd64
+          chmod +x /tmp/kind && sudo mv /tmp/kind /usr/local/bin/kind
+      - name: Create Vault lab
+        run: ./scripts/create.sh --workers 1 --ingress none --dashboard none --vault enabled
+      - name: Configure Kubernetes auth and KV
+        run: |
+          kubectl -n vault exec vault-0 -- sh -c 'VAULT_TOKEN=root vault auth enable kubernetes'
+          kubectl -n vault exec vault-0 -- sh -c 'VAULT_TOKEN=root vault write auth/kubernetes/config kubernetes_host=https://kubernetes.default.svc:443'
+          kubectl -n vault exec vault-0 -- sh -c 'VAULT_TOKEN=root vault kv put secret/e2e message=works'
+          kubectl -n vault exec vault-0 -- sh -c "VAULT_TOKEN=root vault policy write e2e - <<'EOF'
+          path \"secret/data/e2e\" { capabilities = [\"read\"] }
+          EOF"
+          kubectl -n vault exec vault-0 -- sh -c 'VAULT_TOKEN=root vault write auth/kubernetes/role/e2e bound_service_account_names=default bound_service_account_namespaces=vault-test policies=e2e ttl=1h'
+      - name: Verify Agent Injector
+        run: |
+          kubectl create namespace vault-test
+          cat <<'YAML' | kubectl apply -f -
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: injector-test
+            namespace: vault-test
+            annotations:
+              vault.hashicorp.com/agent-inject: "true"
+              vault.hashicorp.com/role: "e2e"
+              vault.hashicorp.com/agent-inject-secret-message: "secret/data/e2e"
+          spec:
+            containers:
+              - name: app
+                image: busybox:1.36
+                command: ["sh","-c","sleep 600"]
+          YAML
+          kubectl -n vault-test wait --for=condition=Ready pod/injector-test --timeout=180s
+          kubectl -n vault-test exec injector-test -c app -- grep -q works /vault/secrets/message
+      - name: Diagnostics
+        if: always()
+        run: |
+          kubectl get pods -A -o wide || true
+          kubectl -n vault-test describe pod injector-test || true
+          kubectl get events -A --sort-by='.lastTimestamp' || true
