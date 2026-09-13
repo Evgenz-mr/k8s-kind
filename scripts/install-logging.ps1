@@ -2,8 +2,6 @@ param([ValidatePattern('^[a-z0-9-]+$')][string]$Cluster='ai-k8s')
 $ErrorActionPreference='Stop';$ctx="kind-$Cluster"
 foreach($cmd in @('helm','kubectl')){if(-not(Get-Command $cmd -ErrorAction SilentlyContinue)){throw "Required command '$cmd' was not found in PATH."}}
 
-# Register repositories one by one and verify each command. With ErrorActionPreference=Stop,
-# semicolon-chained native commands can make repository setup failures hard to diagnose on Windows.
 helm repo add grafana-community https://grafana-community.github.io/helm-charts --force-update
 if($LASTEXITCODE-ne 0){throw 'Failed to add Grafana Community Helm repository.'}
 helm repo add grafana https://grafana.github.io/helm-charts --force-update
@@ -59,15 +57,39 @@ $alloyValues=Join-Path $env:TEMP "alloy-values-$PID.yaml"
 alloy:
   configMap:
     content: |-
-      discovery.kubernetes "pods" { role = "pod" }
+      discovery.kubernetes "pods" {
+        role = "pod"
+      }
+
       discovery.relabel "pods" {
         targets = discovery.kubernetes.pods.targets
-        rule { source_labels = ["__meta_kubernetes_namespace"] target_label = "namespace" }
-        rule { source_labels = ["__meta_kubernetes_pod_name"] target_label = "pod" }
-        rule { source_labels = ["__meta_kubernetes_pod_container_name"] target_label = "container" }
+
+        rule {
+          source_labels = ["__meta_kubernetes_namespace"]
+          target_label  = "namespace"
+        }
+
+        rule {
+          source_labels = ["__meta_kubernetes_pod_name"]
+          target_label  = "pod"
+        }
+
+        rule {
+          source_labels = ["__meta_kubernetes_pod_container_name"]
+          target_label  = "container"
+        }
       }
-      loki.source.kubernetes "pods" { targets = discovery.relabel.pods.output forward_to = [loki.write.default.receiver] }
-      loki.write "default" { endpoint { url = "http://loki-gateway.logging.svc.cluster.local/loki/api/v1/push" } }
+
+      loki.source.kubernetes "pods" {
+        targets    = discovery.relabel.pods.output
+        forward_to = [loki.write.default.receiver]
+      }
+
+      loki.write "default" {
+        endpoint {
+          url = "http://loki-gateway.logging.svc.cluster.local/loki/api/v1/push"
+        }
+      }
 '@|Set-Content $alloyValues -Encoding utf8
 helm upgrade --install alloy grafana/alloy --kube-context $ctx -n logging --create-namespace -f $alloyValues
 $alloyExitCode=$LASTEXITCODE
@@ -75,7 +97,13 @@ Remove-Item $alloyValues -Force
 if($alloyExitCode-ne 0){throw 'Alloy installation failed.'}
 
 kubectl --context $ctx -n logging rollout status statefulset/loki --timeout=300s
+if($LASTEXITCODE-ne 0){throw 'Loki rollout failed or timed out.'}
 kubectl --context $ctx -n logging rollout status daemonset/alloy --timeout=300s
+if($LASTEXITCODE-ne 0){
+    Write-Host 'Alloy rollout failed. Current pods:'
+    kubectl --context $ctx -n logging get pods -o wide
+    throw 'Alloy rollout failed or timed out.'
+}
 
 $previousErrorActionPreference=$ErrorActionPreference
 try{
@@ -100,5 +128,6 @@ data:
         access: proxy
         url: http://loki-gateway.logging.svc.cluster.local
         isDefault: false
-'@|kubectl --context $ctx apply -f -}
+'@|kubectl --context $ctx apply -f -
+if($LASTEXITCODE-ne 0){throw 'Failed to configure Loki Grafana datasource.'}}
 Write-Host 'Loki + Alloy ready.'
