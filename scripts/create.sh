@@ -20,7 +20,19 @@ if [[ "$INGRESS" != none ]];then
     helm repo add haproxytech https://haproxytech.github.io/helm-charts --force-update;helm repo update;helm upgrade --install haproxy-kubernetes-ingress haproxytech/kubernetes-ingress --kube-context "$CTX" -n haproxy-controller --create-namespace --set controller.hostNetwork=true --set-string controller.nodeSelector.ingress-ready=true;kubectl --context "$CTX" -n haproxy-controller rollout status deploy/haproxy-kubernetes-ingress --timeout=300s
   fi
 fi
-if [[ "$CERT_MANAGER" == enabled ]];then helm upgrade --install cert-manager oci://quay.io/jetstack/charts/cert-manager --kube-context "$CTX" -n cert-manager --create-namespace --set crds.enabled=true;kubectl --context "$CTX" -n cert-manager rollout status deploy/cert-manager --timeout=300s;fi
+if [[ "$CERT_MANAGER" == enabled ]];then
+  helm upgrade --install cert-manager oci://quay.io/jetstack/charts/cert-manager --kube-context "$CTX" -n cert-manager --create-namespace --set crds.enabled=true
+  kubectl --context "$CTX" -n cert-manager rollout status deploy/cert-manager --timeout=300s
+  kubectl --context "$CTX" wait --for=condition=Established crd/clusterissuers.cert-manager.io --timeout=120s
+  cat <<'YAML' | kubectl --context "$CTX" apply -f -
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: lab-selfsigned
+spec:
+  selfSigned: {}
+YAML
+fi
 if [[ "$METRICS" == enabled ]];then helm repo add metrics-server https://kubernetes-sigs.github.io/metrics-server/ --force-update;helm repo update;helm upgrade --install metrics-server metrics-server/metrics-server --kube-context "$CTX" -n kube-system --set 'args={--kubelet-insecure-tls,--kubelet-preferred-address-types=InternalIP}' ;kubectl --context "$CTX" -n kube-system rollout status deploy/metrics-server --timeout=300s;fi
 if [[ "$MONITORING" == enabled ]];then helm repo add prometheus-community https://prometheus-community.github.io/helm-charts --force-update;helm repo update;helm upgrade --install monitoring prometheus-community/kube-prometheus-stack --kube-context "$CTX" -n monitoring --create-namespace --set grafana.adminUser=admin --set grafana.adminPassword=admin;kubectl --context "$CTX" -n monitoring rollout status deploy/monitoring-grafana --timeout=300s;fi
 if [[ "$LOGGING" == loki ]];then helm repo add grafana-community https://grafana-community.github.io/helm-charts --force-update;helm repo add grafana https://grafana.github.io/helm-charts --force-update;helm repo update;LV=$(mktemp);cat >"$LV" <<'YAML'
@@ -54,7 +66,25 @@ chunksCache: {enabled: false}
 resultsCache: {enabled: false}
 YAML
 helm upgrade --install loki grafana-community/loki --kube-context "$CTX" -n logging --create-namespace -f "$LV";rm -f "$LV";kubectl --context "$CTX" -n logging rollout status statefulset/loki --timeout=300s;fi
-if [[ "$VAULT" == enabled ]];then helm repo add hashicorp https://helm.releases.hashicorp.com --force-update;helm repo update;helm upgrade --install vault hashicorp/vault --kube-context "$CTX" -n vault --create-namespace --set server.dev.enabled=true --set server.dev.devRootToken=root --set injector.enabled=true;kubectl --context "$CTX" -n vault wait --for=condition=Ready pod/vault-0 --timeout=300s;fi
+if [[ "$VAULT" == enabled ]];then
+  helm repo add hashicorp https://helm.releases.hashicorp.com --force-update
+  helm repo update
+  helm upgrade --install vault hashicorp/vault --kube-context "$CTX" -n vault --create-namespace --set server.dev.enabled=true --set server.dev.devRootToken=root --set injector.enabled=true
+  echo 'Waiting for Vault StatefulSet to be created...'
+  for i in {1..60}; do
+    kubectl --context "$CTX" -n vault get statefulset/vault >/dev/null 2>&1 && break
+    if [[ "$i" -eq 60 ]]; then echo 'Vault StatefulSet was not created within 120s' >&2; kubectl --context "$CTX" -n vault get all || true; exit 1; fi
+    sleep 2
+  done
+  echo 'Waiting for vault-0 pod to be created...'
+  for i in {1..60}; do
+    kubectl --context "$CTX" -n vault get pod/vault-0 >/dev/null 2>&1 && break
+    if [[ "$i" -eq 60 ]]; then echo 'vault-0 pod was not created within 120s' >&2; kubectl --context "$CTX" -n vault get all || true; exit 1; fi
+    sleep 2
+  done
+  kubectl --context "$CTX" -n vault wait --for=condition=Ready pod/vault-0 --timeout=300s
+  kubectl --context "$CTX" -n vault rollout status deployment/vault-agent-injector --timeout=300s
+fi
 [[ "$POSTGRES" == enabled ]]&&{ kubectl --context "$CTX" apply -f "$ROOT/components/postgres.yaml";kubectl --context "$CTX" -n database rollout status deploy/postgres --timeout=300s;};[[ "$MONGODB" == enabled ]]&&{ kubectl --context "$CTX" apply -f "$ROOT/components/mongodb.yaml";kubectl --context "$CTX" -n database rollout status deploy/mongodb --timeout=300s;};[[ "$REDIS" == enabled ]]&&{ kubectl --context "$CTX" apply -f "$ROOT/components/redis.yaml";kubectl --context "$CTX" -n data rollout status deploy/redis --timeout=300s;};[[ "$KAFKA" == enabled ]]&&{ kubectl --context "$CTX" apply -f "$ROOT/components/kafka.yaml";kubectl --context "$CTX" -n data rollout status deploy/kafka --timeout=300s;};[[ "$MINIO" == enabled ]]&&{ kubectl --context "$CTX" apply -f "$ROOT/components/minio.yaml";kubectl --context "$CTX" -n data rollout status deploy/minio --timeout=300s;}
 if [[ "$KYVERNO" == enabled ]];then helm repo add kyverno https://kyverno.github.io/kyverno/ --force-update;helm repo update;helm upgrade --install kyverno kyverno/kyverno --kube-context "$CTX" -n kyverno --create-namespace;kubectl --context "$CTX" -n kyverno rollout status deploy/kyverno-admission-controller --timeout=300s;fi
 CLASS="$INGRESS"
