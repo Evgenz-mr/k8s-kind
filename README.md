@@ -38,15 +38,7 @@ cd k8s-kind
 
 The default installation creates a Kind cluster with two workers, NGINX Ingress and Headlamp.
 
-Dynamic worker count / custom cluster name:
-
-```powershell
-.\scripts\create.ps1 -Workers 4 -Name devops-lab
-```
-
 ## Create the full DevOps lab in one command
-
-For a fresh cluster, the complete local stack can be requested directly from `create.ps1`:
 
 ```powershell
 .\scripts\create.ps1 `
@@ -67,55 +59,107 @@ For a fresh cluster, the complete local stack can be requested directly from `cr
   -Kyverno enabled
 ```
 
-Available optional components include:
+Available optional components: Argo CD, cert-manager, metrics-server, Prometheus/Grafana, Loki/Alloy, Vault/Agent Injector, PostgreSQL, MongoDB, Redis, Kafka, MinIO, Kyverno and Cilium (`-Network cilium`).
 
-- Argo CD
-- cert-manager
-- metrics-server
-- Prometheus + Grafana
-- Loki + Grafana Alloy
-- HashiCorp Vault + Agent Injector
-- PostgreSQL
-- MongoDB
-- Redis
-- Kafka
-- MinIO
-- Kyverno
-- Cilium (`-Network cilium`)
+## Deploy AI Creative frontend + backend locally
 
-Do not rerun `create.ps1` against an existing cluster with the same name. Use the component installers below instead.
+The application consists of two repositories:
+
+- `Evgenz-mr/ai-creative-backend`
+- `Evgenz-mr/ai-creative-frontend`
+
+For local Kind development no external container registry is required. The deployment script builds both Docker images locally, loads them into the Kind nodes, creates/reconciles the `ai-creative` namespace, deploys both Helm charts, waits for both Deployments and prints the resulting Kubernetes resources.
+
+Recommended directory layout:
+
+```text
+C:\Users\<user>\k8s-kind
+C:\Users\<user>\ai-creative-backend
+C:\Users\<user>\ai-creative-frontend
+```
+
+Clone the application repositories once:
+
+```powershell
+cd C:\Users\<user>
+git clone https://github.com/Evgenz-mr/ai-creative-backend.git
+git clone https://github.com/Evgenz-mr/ai-creative-frontend.git
+```
+
+Then the complete application deployment is one command from `k8s-kind`:
+
+```powershell
+.\scripts\deploy-ai-creative.ps1 -Cluster ai-k8s
+```
+
+The script performs:
+
+```text
+docker build backend
+docker build frontend
+kind load docker-image backend
+kind load docker-image frontend
+kubectl create/apply namespace
+helm upgrade --install backend
+helm upgrade --install frontend
+kubectl rollout status backend/frontend
+```
+
+It also tries to add this Windows hosts entry automatically:
+
+```text
+127.0.0.1 ai-creative.local
+```
+
+Updating the hosts file requires an elevated PowerShell. If the script cannot update it, it prints a warning; run PowerShell as Administrator or add the entry manually.
+
+Open the site at:
+
+```text
+http://ai-creative.local:8080
+```
+
+Backend ingress:
+
+```text
+http://ai-creative.local:8080/api
+```
+
+Verify deployment:
+
+```powershell
+kubectl --context kind-ai-k8s get pods -n ai-creative
+kubectl --context kind-ai-k8s get svc -n ai-creative
+kubectl --context kind-ai-k8s get ingress -n ai-creative
+```
+
+After changing backend or frontend source code, simply run the same deployment command again. Images are rebuilt/reloaded and Helm reconciles the releases:
+
+```powershell
+.\scripts\deploy-ai-creative.ps1 -Cluster ai-k8s
+```
+
+Custom source directories are supported:
+
+```powershell
+.\scripts\deploy-ai-creative.ps1 `
+  -Cluster ai-k8s `
+  -BackendPath C:\work\ai-creative-backend `
+  -FrontendPath C:\work\ai-creative-frontend
+```
 
 ## Add components to an existing cluster
 
-For an already-created `ai-k8s` cluster, install components independently:
-
 ```powershell
-# cert-manager
 .\scripts\install-cert-manager.ps1 -Cluster ai-k8s
-
-# metrics-server
 .\scripts\install-metrics.ps1 -Cluster ai-k8s
-
-# Prometheus + Grafana
 .\scripts\install-monitoring.ps1 -Cluster ai-k8s -Ingress nginx
-
-# Loki + Grafana Alloy
 .\scripts\install-logging.ps1 -Cluster ai-k8s
-
-# Vault + Agent Injector
 .\scripts\install-vault.ps1 -Cluster ai-k8s
-
-# PostgreSQL + MongoDB
 .\scripts\install-databases.ps1 -Cluster ai-k8s -Postgres enabled -MongoDB enabled
-
-# Redis + Kafka + MinIO + Kyverno
 .\scripts\install-extras.ps1 -Cluster ai-k8s -Redis enabled -Kafka enabled -MinIO enabled -Kyverno enabled
-
-# Argo CD
 .\scripts\install-argocd.ps1 -Cluster ai-k8s -Ingress nginx
 ```
-
-For first-time Windows validation, installing these sequentially is recommended so a component-specific failure is immediately visible.
 
 After installation:
 
@@ -124,24 +168,12 @@ After installation:
 kubectl --context kind-ai-k8s get pods -A
 ```
 
-A successful base smoke test ends with:
-
-```text
-ALL SMOKE TESTS PASSED.
-```
+A successful base smoke test ends with `ALL SMOKE TESTS PASSED.`
 
 ## Headlamp dashboard
 
-Headlamp is installed by default. To install or reconcile it on an existing cluster:
-
 ```powershell
 .\scripts\install-dashboard.ps1 -Dashboard headlamp -Ingress nginx -Cluster ai-k8s
-```
-
-Check its Ingress:
-
-```powershell
-kubectl --context kind-ai-k8s -n headlamp get ingress
 ```
 
 With the default Kind host port mapping and NGINX configuration, Headlamp is exposed at `http://dashboard.localhost:8080`.
@@ -149,8 +181,6 @@ With the default Kind host port mapping and NGINX configuration, Headlamp is exp
 The dashboard installer prints a Kubernetes login token. The `headlamp-admin` account has cluster-admin rights and is intended only for this disposable local lab.
 
 ## Choose an Ingress Controller
-
-The lab supports either NGINX Ingress or HAProxy Kubernetes Ingress. Install only the controller you want.
 
 NGINX:
 
@@ -164,30 +194,7 @@ HAProxy:
 .\scripts\install-ingress.ps1 -Controller haproxy -Cluster ai-k8s
 ```
 
-Check the controller:
-
-```powershell
-kubectl --context kind-ai-k8s get pods -n ingress-nginx
-kubectl --context kind-ai-k8s get ingressclass
-```
-
 NGINX is scheduled on the Kind control-plane node so its host ports connect to Kind's host mappings: HTTP `localhost:8080`, HTTPS `localhost:8443`.
-
-## Ingress demo application
-
-Deploy a two-replica web application, ClusterIP Service and Ingress:
-
-```powershell
-kubectl apply -f .\ingress\demo-app.yaml
-kubectl get deployment,pods,service,ingress
-```
-
-Inspect routing with:
-
-```powershell
-kubectl get svc -A
-kubectl get ingress web-demo -o wide
-```
 
 ## Inspect cluster
 
@@ -196,12 +203,6 @@ kubectl get ingress web-demo -o wide
 kubectl get nodes -o wide
 kubectl get pods -A
 kubectl cluster-info
-```
-
-Named cluster:
-
-```powershell
-.\scripts\status.ps1 -Name devops-lab
 ```
 
 ## Windows troubleshooting
@@ -213,14 +214,7 @@ docker context ls
 docker info
 ```
 
-If an NGINX controller remains Pending:
-
-```powershell
-kubectl --context kind-ai-k8s -n ingress-nginx get pods
-kubectl --context kind-ai-k8s -n ingress-nginx describe pod <pod-name>
-```
-
-For general Kubernetes diagnostics:
+General Kubernetes diagnostics:
 
 ```powershell
 kubectl --context kind-ai-k8s get pods -A -o wide
@@ -237,7 +231,7 @@ kubectl exec -it <pod-name> -- sh
 .\scripts\destroy.ps1
 ```
 
-or:
+or for another cluster name:
 
 ```powershell
 .\scripts\destroy.ps1 -Name devops-lab
