@@ -1,6 +1,16 @@
 param([ValidatePattern('^[a-z0-9-]+$')][string]$Cluster='ai-k8s')
 $ErrorActionPreference='Stop';$ctx="kind-$Cluster"
-helm repo add grafana-community https://grafana-community.github.io/helm-charts --force-update;helm repo add grafana https://grafana.github.io/helm-charts --force-update;helm repo update
+foreach($cmd in @('helm','kubectl')){if(-not(Get-Command $cmd -ErrorAction SilentlyContinue)){throw "Required command '$cmd' was not found in PATH."}}
+
+# Register repositories one by one and verify each command. With ErrorActionPreference=Stop,
+# semicolon-chained native commands can make repository setup failures hard to diagnose on Windows.
+helm repo add grafana-community https://grafana-community.github.io/helm-charts --force-update
+if($LASTEXITCODE-ne 0){throw 'Failed to add Grafana Community Helm repository.'}
+helm repo add grafana https://grafana.github.io/helm-charts --force-update
+if($LASTEXITCODE-ne 0){throw 'Failed to add Grafana Helm repository.'}
+helm repo update
+if($LASTEXITCODE-ne 0){throw 'Failed to update Helm repositories.'}
+
 $lokiValues=Join-Path $env:TEMP "loki-values-$PID.yaml"
 @'
 deploymentMode: Monolithic
@@ -39,7 +49,11 @@ bloomGateway: {replicas: 0}
 chunksCache: {enabled: false}
 resultsCache: {enabled: false}
 '@|Set-Content $lokiValues -Encoding utf8
-helm upgrade --install loki grafana-community/loki --kube-context $ctx -n logging --create-namespace -f $lokiValues;Remove-Item $lokiValues -Force;if($LASTEXITCODE-ne 0){throw 'Loki installation failed.'}
+helm upgrade --install loki grafana-community/loki --kube-context $ctx -n logging --create-namespace -f $lokiValues
+$lokiExitCode=$LASTEXITCODE
+Remove-Item $lokiValues -Force
+if($lokiExitCode-ne 0){throw 'Loki installation failed.'}
+
 $alloyValues=Join-Path $env:TEMP "alloy-values-$PID.yaml"
 @'
 alloy:
@@ -55,11 +69,21 @@ alloy:
       loki.source.kubernetes "pods" { targets = discovery.relabel.pods.output forward_to = [loki.write.default.receiver] }
       loki.write "default" { endpoint { url = "http://loki-gateway.logging.svc.cluster.local/loki/api/v1/push" } }
 '@|Set-Content $alloyValues -Encoding utf8
-helm upgrade --install alloy grafana/alloy --kube-context $ctx -n logging -f $alloyValues;Remove-Item $alloyValues -Force;if($LASTEXITCODE-ne 0){throw 'Alloy installation failed.'}
+helm upgrade --install alloy grafana/alloy --kube-context $ctx -n logging --create-namespace -f $alloyValues
+$alloyExitCode=$LASTEXITCODE
+Remove-Item $alloyValues -Force
+if($alloyExitCode-ne 0){throw 'Alloy installation failed.'}
+
 kubectl --context $ctx -n logging rollout status statefulset/loki --timeout=300s
 kubectl --context $ctx -n logging rollout status daemonset/alloy --timeout=300s
-kubectl --context $ctx get namespace monitoring *> $null
-if($LASTEXITCODE-eq 0){@'
+
+$previousErrorActionPreference=$ErrorActionPreference
+try{
+    $ErrorActionPreference='Continue'
+    kubectl --context $ctx get namespace monitoring 1>$null 2>$null
+    $monitoringExitCode=$LASTEXITCODE
+}finally{$ErrorActionPreference=$previousErrorActionPreference}
+if($monitoringExitCode-eq 0){@'
 apiVersion: v1
 kind: ConfigMap
 metadata:
