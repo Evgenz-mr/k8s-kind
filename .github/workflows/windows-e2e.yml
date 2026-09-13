@@ -1,0 +1,26 @@
+name: windows-e2e
+on:
+  push:
+    branches: [full-stack-e2e-clean, main]
+  pull_request:
+    branches: [main]
+jobs:
+  powershell-syntax:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse PowerShell scripts
+        shell: pwsh
+        run: |
+          $failed=$false
+          Get-ChildItem scripts -Filter *.ps1 | ForEach-Object {
+            $tokens=$null;$errors=$null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName,[ref]$tokens,[ref]$errors)
+            if($errors.Count -gt 0){$failed=$true;Write-Host "Parse errors in $($_.Name)"; $errors | Format-List}
+          }
+          if($failed){exit 1}
+      - name: Validate expected Windows launcher options
+        shell: pwsh
+        run: |
+          $text=Get-Content scripts/create.ps1 -Raw
+          foreach($option in @('Postgres','MongoDB','Redis','Kafka','MinIO','Kyverno','Network','Logging','Vault')){if($text -notmatch ('\$'+$option)){throw "Missing option $option"}}
