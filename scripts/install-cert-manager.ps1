@@ -10,7 +10,13 @@ foreach ($cmd in @('helm','kubectl')) {
 }
 
 Write-Host "Installing cert-manager into '$Cluster'..."
-helm upgrade --install cert-manager oci://quay.io/jetstack/charts/cert-manager `
+# Use the official Jetstack Helm repository rather than the Quay OCI chart path.
+# This avoids Quay anonymous-token/auth failures seen with some Docker Desktop/Windows networks.
+helm repo add jetstack https://charts.jetstack.io --force-update
+if ($LASTEXITCODE -ne 0) { throw 'Failed to add Jetstack Helm repository.' }
+helm repo update
+if ($LASTEXITCODE -ne 0) { throw 'Failed to update Helm repositories.' }
+helm upgrade --install cert-manager jetstack/cert-manager `
     --kube-context $context `
     --namespace cert-manager `
     --create-namespace `
