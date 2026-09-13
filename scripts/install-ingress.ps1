@@ -6,11 +6,15 @@ kubectl --context $context label node "$Cluster-control-plane" ingress-ready=tru
 if($Controller-eq'nginx'){
  helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx --force-update;helm repo update
  helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx --kube-context $context -n ingress-nginx --create-namespace `
+  --set controller.kind=DaemonSet `
   --set controller.service.type=ClusterIP `
   --set controller.hostPort.enabled=true `
-  --set-string 'controller.nodeSelector.ingress-ready=true'
+  --set-string 'controller.nodeSelector.ingress-ready=true' `
+  --set 'controller.tolerations[0].key=node-role.kubernetes.io/control-plane' `
+  --set 'controller.tolerations[0].operator=Exists' `
+  --set 'controller.tolerations[0].effect=NoSchedule'
  if($LASTEXITCODE-ne 0){throw 'NGINX Ingress installation failed.'}
- kubectl --context $context -n ingress-nginx rollout status deployment/ingress-nginx-controller --timeout=240s
+ kubectl --context $context -n ingress-nginx rollout status daemonset/ingress-nginx-controller --timeout=240s
 }else{
  helm repo add haproxytech https://haproxytech.github.io/helm-charts --force-update;helm repo update
  helm upgrade --install haproxy-kubernetes-ingress haproxytech/kubernetes-ingress --kube-context $context -n haproxy-controller --create-namespace `
