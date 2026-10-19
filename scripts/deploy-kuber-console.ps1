@@ -166,7 +166,7 @@ $realm = @{
             value = 'evgen'
             temporary = $false
         })
-        groups = @('kuber-cluster-admins')
+        groups = @('/kuber-cluster-admins')
     })
     clients = @(@{
         clientId = 'kuber-console'; name = 'Kuber Console'; enabled = $true
