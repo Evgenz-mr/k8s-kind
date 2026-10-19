@@ -157,6 +157,17 @@ $realmFile = Join-Path $Generated 'kuber-realm.json'
 $realm = @{
     realm = 'kuber'; enabled = $true
     groups = @(@{ name = 'kuber-cluster-admins' }, @{ name = 'kuber-namespace-admins' })
+    users = @(@{
+        username = 'evgen'
+        enabled = $true
+        emailVerified = $true
+        credentials = @(@{
+            type = 'password'
+            value = 'evgen'
+            temporary = $false
+        })
+        groups = @('kuber-cluster-admins')
+    })
     clients = @(@{
         clientId = 'kuber-console'; name = 'Kuber Console'; enabled = $true
         protocol = 'openid-connect'; publicClient = $false; secret = $clientSecret
@@ -181,9 +192,8 @@ Invoke-Native { kubectl --context $Context -n $SystemNamespace create secret gen
 Invoke-Native { kubectl --context $Context -n $SystemNamespace create secret generic kuber-keycloak-realm --from-file=kuber-realm.json=$realmFile --dry-run=client -o yaml | kubectl --context $Context apply -f - } 'Could not apply Keycloak realm Secret.'
 $adminPassword = $null; $clientSecret = $null; $cookieEncryptionKey = $null; $cookieAuthenticationKey = $null; $realm = $null
 Invoke-Native { kubectl --context $Context apply -f (Join-Path $AppRoot 'oidc\keycloak-deployment.yaml') } 'Could not deploy Keycloak.'
-if ($rotateCa) {
-    Invoke-Native { kubectl --context $Context -n $SystemNamespace rollout restart deployment/kuber-keycloak } 'Could not restart Keycloak after rotating the OIDC CA.'
-}
+# Realm import only runs when Keycloak starts with an empty local database. This test setup is ephemeral.
+Invoke-Native { kubectl --context $Context -n $SystemNamespace rollout restart deployment/kuber-keycloak } 'Could not restart Keycloak to import the configured realm.'
 Invoke-Native { kubectl --context $Context -n $SystemNamespace rollout status deployment/kuber-keycloak --timeout=5m } 'Keycloak did not become ready.'
 
 Write-Host '[4/8] Preparing Kubernetes OIDC authentication configuration...'
