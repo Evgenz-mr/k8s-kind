@@ -268,7 +268,7 @@ $pfConsole = Start-Process -FilePath 'kubectl.exe' -ArgumentList @('--context',$
 Set-Content -Path (Join-Path $Generated 'port-forward-pids.txt') -Value "keycloak=$($pfKeycloak.Id)`nconsole=$($pfConsole.Id)" -Encoding ascii
 Start-Sleep -Seconds 3
 if ($pfKeycloak.HasExited -or $pfConsole.HasExited) { throw "A port-forward process exited. Check logs under $Generated" }
-Invoke-Native { curl.exe --fail --silent --show-error --cacert $caCrt --resolve keycloak.kuber.local:9443:127.0.0.1 https://keycloak.kuber.local:9443/realms/kuber/.well-known/openid-configuration -o (Join-Path $Generated 'oidc-discovery.json') } 'Keycloak OIDC discovery check failed.'
+Invoke-Native { curl.exe --ssl-no-revoke --fail --silent --show-error --cacert $caCrt --resolve keycloak.kuber.local:9443:127.0.0.1 https://keycloak.kuber.local:9443/realms/kuber/.well-known/openid-configuration -o (Join-Path $Generated 'oidc-discovery.json') } 'Keycloak OIDC discovery check failed.'
 Invoke-Native { curl.exe --fail --silent --show-error http://localhost:9000/ -o NUL } 'Kuber Console HTTP check failed.'
 
 Write-Host '[7/8] Running RBAC boundary checks...'
