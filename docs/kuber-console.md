@@ -37,9 +37,9 @@ Trust the generated CA from elevated PowerShell if the browser reports an untrus
 certutil -addstore -f Root .\generated\kuber-console\ca.crt
 ```
 
-Open `https://keycloak.kuber.local:9443`, sign into the Keycloak admin account using the password in `generated\kuber-console\keycloak-admin.txt`, and create users in realm `kuber`. Add cluster administrators only to `kuber-cluster-admins`; add namespace administrators only to `kuber-namespace-admins`. The console account flow uses OIDC authorization code; no password is saved by Kuber.
+Open `https://keycloak.kuber.local:9443` and sign into the Keycloak admin account using the password in `generated\kuber-console\keycloak-admin.txt`. The realm import creates the local test user `evgen` with password `evgen` in `kuber-cluster-admins`; use it to sign into the Console as a cluster administrator. This fixed credential is for the local test cluster only. Add other users to `kuber-cluster-admins` or `kuber-namespace-admins` as needed. The Console account flow uses OIDC authorization code; no password is saved by Kuber.
 
-Open the dashboard at `http://localhost:9000`, select login, and test each role with a separate user. Run the automated checks again with:
+The deployment restarts Keycloak so it imports the generated realm. Keycloak storage is ephemeral in this local test setup, so a redeploy resets realm data and removes users created manually.\n\nOpen the dashboard at `http://localhost:9000`, select login, and test each role with a separate user. Run the automated checks again with:
 
 ```powershell
 .\scripts\test-kuber-console.ps1 -Cluster ai-k8s
