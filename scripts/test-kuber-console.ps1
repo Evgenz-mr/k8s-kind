@@ -27,6 +27,7 @@ $authenticationKeyLength=[Convert]::FromBase64String($sessionSecret.data.'cookie
 if($encryptionKeyLength -ne 32 -or $authenticationKeyLength -ne 64){throw "Invalid Console session key lengths: encryption=$encryptionKeyLength (expected 32), authentication=$authenticationKeyLength (expected 64)."}
 $consoleDeployment=kubectl --context $Context -n $SystemNamespace get deployment kuber-console -o json | ConvertFrom-Json
 $consoleArgs=$consoleDeployment.spec.template.spec.containers | Where-Object {$_.name -eq 'console'} | Select-Object -ExpandProperty args
+if($consoleArgs -notcontains '--public-dir=/opt/bridge/static'){throw 'Console deployment is missing the static asset directory flag.'}
 if($consoleArgs -notcontains '--cookie-encryption-key-file=/var/run/kuber-session/cookie-encryption-key' -or $consoleArgs -notcontains '--cookie-authentication-key-file=/var/run/kuber-session/cookie-authentication-key'){throw 'Console deployment is missing required OIDC cookie key flags.'}
 
 Write-Host '[4/7] OIDC discovery issuer and TLS'
