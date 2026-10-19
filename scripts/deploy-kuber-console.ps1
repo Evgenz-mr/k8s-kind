@@ -159,6 +159,9 @@ $realm = @{
     groups = @(@{ name = 'kuber-cluster-admins' }, @{ name = 'kuber-namespace-admins' })
     users = @(@{
         username = 'evgen'
+        firstName = 'Evgen'
+        lastName = 'Admin'
+        email = 'evgen@kuber.local'
         enabled = $true
         emailVerified = $true
         credentials = @(@{
@@ -177,6 +180,9 @@ $realm = @{
         protocolMappers = @(@{
             name = 'groups'; protocol = 'openid-connect'; protocolMapper = 'oidc-group-membership-mapper'; consentRequired = $false
             config = @{ 'claim.name'='groups'; 'full.path'='false'; 'id.token.claim'='true'; 'access.token.claim'='true'; 'userinfo.token.claim'='true' }
+        },@{
+            name = 'full-name'; protocol = 'openid-connect'; protocolMapper = 'oidc-full-name-mapper'; consentRequired = $false
+            config = @{ 'id.token.claim'='true'; 'access.token.claim'='true'; 'userinfo.token.claim'='true' }
         },@{
             name = 'kuber-console-audience'; protocol = 'openid-connect'; protocolMapper = 'oidc-audience-mapper'; consentRequired = $false
             config = @{ 'included.client.audience'='kuber-console'; 'id.token.claim'='true'; 'access.token.claim'='true' }
