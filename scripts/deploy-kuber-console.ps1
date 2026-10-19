@@ -50,7 +50,7 @@ if (-not (Test-Path (Join-Path $AppRoot 'Chart.yaml'))) { throw "Kuber Console c
 New-Item -ItemType Directory -Force -Path $Generated | Out-Null
 
 Write-Host "[1/8] Checking existing Kind cluster '$Cluster' and Kubernetes $($version.serverVersion.gitVersion)..."
-Invoke-Native { docker info *> $null } 'Docker engine is unavailable.'
+Invoke-Native { cmd.exe /c 'docker info >NUL 2>&1' } 'Docker engine is unavailable.'
 
 Write-Host '[2/8] Reserving the Keycloak Service address...'
 Invoke-Native { kubectl --context $Context apply -f (Join-Path $AppRoot 'oidc\keycloak-service.yaml') } 'Could not create the Keycloak namespace and Service.'
