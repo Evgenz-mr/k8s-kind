@@ -22,6 +22,9 @@ if($LASTEXITCODE -ne 0){throw 'Kuber Console is not ready.'}
 Write-Host '[3/7] OIDC session cookie keys'
 $sessionSecret=kubectl --context $Context -n $SystemNamespace get secret kuber-console-session -o json | ConvertFrom-Json
 if($LASTEXITCODE -ne 0 -or -not $sessionSecret.data.'cookie-encryption-key' -or -not $sessionSecret.data.'cookie-authentication-key'){throw 'Kuber Console session key Secret is missing or incomplete.'}
+$encryptionKeyLength=[Convert]::FromBase64String($sessionSecret.data.'cookie-encryption-key').Length
+$authenticationKeyLength=[Convert]::FromBase64String($sessionSecret.data.'cookie-authentication-key').Length
+if($encryptionKeyLength -ne 32 -or $authenticationKeyLength -ne 64){throw "Invalid Console session key lengths: encryption=$encryptionKeyLength (expected 32), authentication=$authenticationKeyLength (expected 64)."}
 $consoleDeployment=kubectl --context $Context -n $SystemNamespace get deployment kuber-console -o json | ConvertFrom-Json
 $consoleArgs=$consoleDeployment.spec.template.spec.containers | Where-Object {$_.name -eq 'console'} | Select-Object -ExpandProperty args
 if($consoleArgs -notcontains '--cookie-encryption-key-file=/var/run/kuber-session/cookie-encryption-key' -or $consoleArgs -notcontains '--cookie-authentication-key-file=/var/run/kuber-session/cookie-authentication-key'){throw 'Console deployment is missing required OIDC cookie key flags.'}
