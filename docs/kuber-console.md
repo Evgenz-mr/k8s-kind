@@ -23,7 +23,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\scripts\deploy-kuber-console.ps1 -Cluster ai-k8s
 ```
 
-The script applies Keycloak and the dashboard in `kuber-system`, creates `kuber-e2e` for an isolated RBAC test, creates local-only generated certificates and secrets under the ignored `generated\kuber-console` directory, patches the existing Kind control-plane static Pod manifest after saving a backup inside that node container, opens local-only port-forwards, and runs health and RBAC checks. It never runs `kind delete cluster`.
+The script applies Keycloak and the dashboard in `kuber-system`, creates `kuber-e2e` for an isolated RBAC test, creates local-only generated certificates and secrets (including persistent cookie-session keys) under the ignored `generated\kuber-console` directory, patches the existing Kind control-plane static Pod manifest after saving a backup inside that node container, opens local-only port-forwards, and runs health and RBAC checks. It never runs `kind delete cluster`.
 
 Add this hosts entry from an elevated editor:
 
@@ -62,4 +62,4 @@ helm uninstall kuber-console --kube-context kind-ai-k8s -n kuber-system
 kubectl --context kind-ai-k8s -n kuber-system delete deployment kuber-keycloak
 ```
 
-Do not delete namespaces as part of cleanup if they contain anything else. Generated CA keys and passwords are local secrets: do not commit or share the generated directory. Keycloak storage is ephemeral in this local test setup.
+Do not delete namespaces as part of cleanup if they contain anything else. Generated CA keys, passwords, OIDC client secret, and Console cookie-session keys are local secrets: do not commit or share the generated directory. The cookie keys are kept stable across reruns so existing sessions remain valid. Keycloak storage is ephemeral in this local test setup.
