@@ -183,11 +183,17 @@ if (-not (Select-String -Path $localManifest -SimpleMatch $authFlag -Quiet)) {
     Invoke-Native { yq eval --inplace --from-file $patchFile $localManifest } 'Could not patch kube-apiserver manifest for OIDC.'
     Invoke-Native { docker cp $localManifest "${Node}:$manifest" } 'Could not install the OIDC-enabled kube-apiserver manifest.'
 }
+$apiReady = $false
 for ($i = 0; $i -lt 60; $i++) {
-    kubectl --context $Context get nodes *> $null
-    if ($LASTEXITCODE -eq 0) { break }
+    try {
+        kubectl --context $Context get nodes 2>$null *> $null
+        if ($LASTEXITCODE -eq 0) { $apiReady = $true; break }
+    } catch {
+        # kubectl may briefly return EOF while the static kube-apiserver Pod restarts.
+    }
     Start-Sleep -Seconds 3
 }
+if (-not $apiReady) { throw 'Kubernetes API did not recover after the OIDC configuration change. Inspect kube-apiserver logs before retrying.' }
 Invoke-Native { kubectl --context $Context get nodes } 'Kubernetes API did not recover after the OIDC configuration change.'
 
 Write-Host '[5/8] Installing the Kuber Console chart (dashboard only; no ARGUS application stack)...'
