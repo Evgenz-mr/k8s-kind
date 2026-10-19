@@ -196,6 +196,18 @@ HAProxy:
 
 NGINX is scheduled on the Kind control-plane node so its host ports connect to Kind's host mappings: HTTP `localhost:8080`, HTTPS `localhost:8443`.
 
+## Install Kuber Console + Keycloak OIDC on an existing Kind cluster
+
+This adds only the Kuber dashboard and Keycloak login; it does not install the ARGUS application or recreate your cluster. Kubernetes 1.34+ is required. The script checks the selected Kind context and ports before changes, then runs health, OIDC discovery, and RBAC boundary checks.
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\scripts\deploy-kuber-console.ps1 -Cluster ai-k8s
+.\scripts\test-kuber-console.ps1 -Cluster ai-k8s
+```
+
+Detailed setup, browser login, certificate trust, and rollback: [docs/kuber-console.md](docs/kuber-console.md).
+
 ## Inspect cluster
 
 ```powershell

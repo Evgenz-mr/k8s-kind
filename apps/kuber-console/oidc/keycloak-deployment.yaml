@@ -1,0 +1,91 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kuber-keycloak
+  namespace: kuber-system
+  labels:
+    app.kubernetes.io/name: keycloak
+    app.kubernetes.io/part-of: kuber-console
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: keycloak
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: keycloak
+        app.kubernetes.io/part-of: kuber-console
+    spec:
+      containers:
+        - name: keycloak
+          image: quay.io/keycloak/keycloak:26.8.1
+          imagePullPolicy: IfNotPresent
+          args: ["start", "--import-realm", "--http-enabled=false", "--health-enabled=true"]
+          env:
+            - name: KC_BOOTSTRAP_ADMIN_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: kuber-keycloak-admin
+                  key: username
+            - name: KC_BOOTSTRAP_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: kuber-keycloak-admin
+                  key: password
+            - name: KC_HOSTNAME
+              value: https://keycloak.kuber.local:9443
+            - name: KC_HTTPS_CERTIFICATE_FILE
+              value: /etc/x509/https/tls.crt
+            - name: KC_HTTPS_CERTIFICATE_KEY_FILE
+              value: /etc/x509/https/tls.key
+            - name: KC_HTTP_MANAGEMENT_SCHEME
+              value: http
+          ports:
+            - name: https
+              containerPort: 8443
+            - name: management
+              containerPort: 9000
+          startupProbe:
+            httpGet:
+              path: /health/ready
+              port: management
+              scheme: HTTP
+            failureThreshold: 60
+            periodSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: management
+              scheme: HTTP
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: management
+              scheme: HTTP
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/x509/https
+              readOnly: true
+            - name: realm-import
+              mountPath: /opt/keycloak/data/import
+              readOnly: true
+      volumes:
+        - name: tls
+          secret:
+            secretName: kuber-keycloak-tls
+        - name: realm-import
+          secret:
+            secretName: kuber-keycloak-realm
+            items:
+              - key: kuber-realm.json
+                path: kuber-realm.json

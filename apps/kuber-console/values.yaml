@@ -1,0 +1,30 @@
+image:
+  repository: quay.io/openshift/origin-console
+  tag: "4.22"
+  pullPolicy: IfNotPresent
+
+service:
+  port: 9000
+
+auth:
+  issuerUrl: https://keycloak.kuber.local:9443/realms/kuber
+  clientId: kuber-console
+  secretName: kuber-oidc-client
+  secretKey: client-secret
+  caSecretName: kuber-oidc-ca
+  caSecretKey: ca.crt
+  issuerHostAlias: ""
+  baseAddress: http://localhost:9000/
+
+rbac:
+  clusterAdminGroup: oidc:kuber-cluster-admins
+  namespaceAdminGroup: oidc:kuber-namespace-admins
+  namespace: kuber-e2e
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
