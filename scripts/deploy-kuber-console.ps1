@@ -285,5 +285,3 @@ Write-Host "Create users in Keycloak realm kuber and add each only to kuber-clus
 Write-Host 'Console: http://localhost:9000  |  Keycloak: https://keycloak.kuber.local:9443'
 Write-Host "Port-forward process IDs and logs: $Generated"
 Write-Host "Port-forward process IDs: $Generated\port-forward-pids.txt (stop only those PIDs with Stop-Process)."
-) { throw 'The OIDC CA fingerprint has an unexpected format.' }
-
