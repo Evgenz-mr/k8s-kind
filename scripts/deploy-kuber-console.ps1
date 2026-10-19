@@ -172,7 +172,7 @@ $realm = @{
         clientId = 'kuber-console'; name = 'Kuber Console'; enabled = $true
         protocol = 'openid-connect'; publicClient = $false; secret = $clientSecret
         standardFlowEnabled = $true; directAccessGrantsEnabled = $false
-        redirectUris = @('http://localhost:9000/auth/callback')
+        redirectUris = @('http://localhost:9000/auth/callback', 'http://localhost:9000/')
         webOrigins = @('http://localhost:9000')
         protocolMappers = @(@{
             name = 'groups'; protocol = 'openid-connect'; protocolMapper = 'oidc-group-membership-mapper'; consentRequired = $false
