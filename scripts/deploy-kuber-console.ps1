@@ -71,8 +71,29 @@ $serverKey = Join-Path $Generated 'tls.key'
 $serverCrt = Join-Path $Generated 'tls.crt'
 $config = Join-Path $Generated 'openssl.cnf'
 $csr = Join-Path $Generated 'tls.csr'
-if (-not (Test-Path $caKey) -or -not (Test-Path $caCrt)) {
-    Invoke-Native { openssl req -x509 -newkey rsa:3072 -nodes -days 825 -keyout $caKey -out $caCrt -subj '/CN=Kuber local OIDC CA' -addext 'basicConstraints=critical,CA:TRUE' -addext 'keyUsage=critical,keyCertSign,cRLSign' } 'Could not generate local OIDC CA.'
+$caConfig = Join-Path $Generated 'ca-openssl.cnf'
+$rotateCa = $false
+if ((Test-Path $caCrt) -and (Test-Path $caKey)) {
+    $constraints = @(openssl x509 -in $caCrt -noout -ext basicConstraints 2>$null | Select-String 'CA:TRUE')
+    if ($LASTEXITCODE -ne 0 -or $constraints.Count -ne 1) { $rotateCa = $true }
+} else {
+    $rotateCa = $true
+}
+if ($rotateCa) {
+    @'
+[req]
+distinguished_name = dn
+prompt = no
+x509_extensions = v3_ca
+[dn]
+CN = Kuber local OIDC CA
+[v3_ca]
+basicConstraints = critical,CA:TRUE
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always,issuer
+'@ | Set-Content -Path $caConfig -Encoding ascii
+    Invoke-Native { openssl req -x509 -newkey rsa:3072 -nodes -days 825 -keyout $caKey -out $caCrt -config $caConfig } 'Could not generate local OIDC CA.'
 }
 @"
 [req]
@@ -154,6 +175,9 @@ Invoke-Native { kubectl --context $Context -n $SystemNamespace create secret gen
 Invoke-Native { kubectl --context $Context -n $SystemNamespace create secret generic kuber-keycloak-realm --from-file=kuber-realm.json=$realmFile --dry-run=client -o yaml | kubectl --context $Context apply -f - } 'Could not apply Keycloak realm Secret.'
 $adminPassword = $null; $clientSecret = $null; $cookieEncryptionKey = $null; $cookieAuthenticationKey = $null; $realm = $null
 Invoke-Native { kubectl --context $Context apply -f (Join-Path $AppRoot 'oidc\keycloak-deployment.yaml') } 'Could not deploy Keycloak.'
+if ($rotateCa) {
+    Invoke-Native { kubectl --context $Context -n $SystemNamespace rollout restart deployment/kuber-keycloak } 'Could not restart Keycloak after rotating the OIDC CA.'
+}
 Invoke-Native { kubectl --context $Context -n $SystemNamespace rollout status deployment/kuber-keycloak --timeout=5m } 'Keycloak did not become ready.'
 
 Write-Host '[4/8] Preparing Kubernetes OIDC authentication configuration...'
@@ -198,6 +222,13 @@ if (-not (Select-String -Path $localManifest -SimpleMatch $authFlag -Quiet)) {
     Invoke-Native { yq eval --inplace --from-file $patchFile $localManifest } 'Could not patch kube-apiserver manifest for OIDC.'
     Invoke-Native { docker cp $localManifest "${Node}:$manifest" } 'Could not install the OIDC-enabled kube-apiserver manifest.'
 }
+if ($rotateCa) {
+    $rotationId = [guid]::NewGuid().ToString()
+    $rotationExpr = '.metadata.annotations."kuber.local/oidc-ca-rotation" = "' + $rotationId + '"'
+    Invoke-Native { yq eval --inplace $rotationExpr $localManifest } 'Could not mark kube-apiserver for OIDC CA rotation.'
+    Invoke-Native { docker cp $localManifest "${Node}:$manifest" } 'Could not restart kube-apiserver after rotating the OIDC CA.'
+}
+
 $apiReady = $false
 for ($i = 0; $i -lt 60; $i++) {
     try {
