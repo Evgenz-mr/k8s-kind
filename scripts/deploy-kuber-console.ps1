@@ -113,7 +113,18 @@ if (-not (Test-Path $clientSecretFile)) {
 $cookieEncryptionKeyFile = Join-Path $Generated 'cookie-encryption-key.txt'
 $cookieAuthenticationKeyFile = Join-Path $Generated 'cookie-authentication-key.txt'
 $cookieEncryptionKey = if (Test-Path $cookieEncryptionKeyFile) { (Get-Content $cookieEncryptionKeyFile -Raw).Trim() } else { '' }
-if ($cookieEncryptionKey -notmatch '^[0-9a-f]{32}$adminPassword = ((Get-Content $adminFile | Where-Object { $_ -like 'password=*' }) -replace '^password=','')
+if ($cookieEncryptionKey -notmatch '^[0-9a-f]{32}$') {
+    $cookieEncryptionKey = (openssl rand -hex 16).Trim()
+    if ($LASTEXITCODE -ne 0 -or $cookieEncryptionKey -notmatch '^[0-9a-f]{32}$') { throw 'Could not generate a valid 32-character Console cookie encryption key.' }
+    Set-Content -Path $cookieEncryptionKeyFile -Value $cookieEncryptionKey -NoNewline -Encoding ascii
+}
+$cookieAuthenticationKey = if (Test-Path $cookieAuthenticationKeyFile) { (Get-Content $cookieAuthenticationKeyFile -Raw).Trim() } else { '' }
+if ($cookieAuthenticationKey -notmatch '^[0-9a-f]{64}$') {
+    $cookieAuthenticationKey = (openssl rand -hex 32).Trim()
+    if ($LASTEXITCODE -ne 0 -or $cookieAuthenticationKey -notmatch '^[0-9a-f]{64}$') { throw 'Could not generate a valid 64-character Console cookie authentication key.' }
+    Set-Content -Path $cookieAuthenticationKeyFile -Value $cookieAuthenticationKey -NoNewline -Encoding ascii
+}
+$adminPassword = ((Get-Content $adminFile | Where-Object { $_ -like 'password=*' }) -replace '^password=','')
 $clientSecret = (Get-Content $clientSecretFile -Raw).Trim()
 $realmFile = Join-Path $Generated 'kuber-realm.json'
 $realm = @{
