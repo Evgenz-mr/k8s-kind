@@ -110,6 +110,16 @@ if (-not (Test-Path $clientSecretFile)) {
     if ($LASTEXITCODE -ne 0 -or -not $clientSecret) { throw 'Could not generate OIDC client secret.' }
     Set-Content -Path $clientSecretFile -Value $clientSecret -NoNewline -Encoding ascii
 }
+$cookieEncryptionKeyFile = Join-Path $Generated 'cookie-encryption-key.txt'
+$cookieAuthenticationKeyFile = Join-Path $Generated 'cookie-authentication-key.txt'
+foreach ($keyFile in @($cookieEncryptionKeyFile, $cookieAuthenticationKeyFile)) {
+    if (-not (Test-Path $keyFile)) {
+        $cookieKey = (openssl rand -hex 32).Trim()
+        if ($LASTEXITCODE -ne 0 -or -not $cookieKey) { throw "Could not generate Console session key: $keyFile" }
+        Set-Content -Path $keyFile -Value $cookieKey -NoNewline -Encoding ascii
+        $cookieKey = $null
+    }
+}
 $adminPassword = ((Get-Content $adminFile | Where-Object { $_ -like 'password=*' }) -replace '^password=','')
 $clientSecret = (Get-Content $clientSecretFile -Raw).Trim()
 $realmFile = Join-Path $Generated 'kuber-realm.json'
@@ -136,8 +146,9 @@ Invoke-Native { kubectl --context $Context -n $SystemNamespace create secret tls
 Invoke-Native { kubectl --context $Context -n $SystemNamespace create secret generic kuber-keycloak-admin --from-literal=username=kcadmin --from-literal=password=$adminPassword --dry-run=client -o yaml | kubectl --context $Context apply -f - } 'Could not apply Keycloak administrator Secret.'
 Invoke-Native { kubectl --context $Context -n $SystemNamespace create secret generic kuber-oidc-ca --from-file=ca.crt=$caCrt --dry-run=client -o yaml | kubectl --context $Context apply -f - } 'Could not apply OIDC CA Secret.'
 Invoke-Native { kubectl --context $Context -n $SystemNamespace create secret generic kuber-oidc-client --from-literal=client-secret=$clientSecret --dry-run=client -o yaml | kubectl --context $Context apply -f - } 'Could not apply OIDC client Secret.'
+Invoke-Native { kubectl --context $Context -n $SystemNamespace create secret generic kuber-console-session --from-file=cookie-encryption-key=$cookieEncryptionKeyFile --from-file=cookie-authentication-key=$cookieAuthenticationKeyFile --dry-run=client -o yaml | kubectl --context $Context apply -f - } 'Could not apply Console session key Secret.'
 Invoke-Native { kubectl --context $Context -n $SystemNamespace create secret generic kuber-keycloak-realm --from-file=kuber-realm.json=$realmFile --dry-run=client -o yaml | kubectl --context $Context apply -f - } 'Could not apply Keycloak realm Secret.'
-$adminPassword = $null; $clientSecret = $null; $realm = $null
+$adminPassword = $null; $clientSecret = $null; $cookieKey = $null; $realm = $null
 Invoke-Native { kubectl --context $Context apply -f (Join-Path $AppRoot 'oidc\keycloak-deployment.yaml') } 'Could not deploy Keycloak.'
 Invoke-Native { kubectl --context $Context -n $SystemNamespace rollout status deployment/kuber-keycloak --timeout=5m } 'Keycloak did not become ready.'
 
