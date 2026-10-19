@@ -226,8 +226,9 @@ if (-not (Select-String -Path $localManifest -SimpleMatch $authFlag -Quiet)) {
 }
 if ($rotateCa -and $existingAuthConfig) {
     $rotationId = [guid]::NewGuid().ToString()
-    $rotationExpr = '.metadata.annotations."kuber.local/oidc-ca-rotation" = "' + $rotationId + '"'
-    Invoke-Native { yq eval --inplace $rotationExpr $localManifest } 'Could not mark kube-apiserver for OIDC CA rotation.'
+    $rotationPatch = Join-Path $Generated 'patch-apiserver-ca-rotation.yq'
+    '.metadata.annotations."kuber.local/oidc-ca-rotation" = "' + $rotationId + '"' | Set-Content -Path $rotationPatch -Encoding ascii
+    Invoke-Native { yq eval --inplace --from-file $rotationPatch $localManifest } 'Could not mark kube-apiserver for OIDC CA rotation.'
     Invoke-Native { docker cp $localManifest "${Node}:$manifest" } 'Could not restart kube-apiserver after rotating the OIDC CA.'
 }
 
