@@ -115,8 +115,10 @@ DNS.2 = keycloak.${SystemNamespace}.svc
 DNS.3 = keycloak.${SystemNamespace}.svc.cluster.local
 IP.1 = $serviceIp
 "@ | Set-Content -Path $config -Encoding ascii
-Invoke-Native { openssl req -new -newkey rsa:3072 -nodes -keyout $serverKey -out $csr -subj '/CN=keycloak.kuber.local' -config $config } 'Could not generate Keycloak TLS key.'
-Invoke-Native { openssl x509 -req -in $csr -CA $caCrt -CAkey $caKey -CAcreateserial -out $serverCrt -days 397 -sha256 -extensions server_ext -extfile $config } 'Could not sign Keycloak TLS certificate.'
+if ($rotateCa -or -not (Test-Path $serverKey) -or -not (Test-Path $serverCrt)) {
+    Invoke-Native { openssl req -new -newkey rsa:3072 -nodes -keyout $serverKey -out $csr -subj '/CN=keycloak.kuber.local' -config $config } 'Could not generate Keycloak TLS key.'
+    Invoke-Native { openssl x509 -req -in $csr -CA $caCrt -CAkey $caKey -CAcreateserial -out $serverCrt -days 397 -sha256 -extensions server_ext -extfile $config } 'Could not sign Keycloak TLS certificate.'
+}
 
 $adminFile = Join-Path $Generated 'keycloak-admin.txt'
 $clientSecretFile = Join-Path $Generated 'oidc-client-secret.txt'
