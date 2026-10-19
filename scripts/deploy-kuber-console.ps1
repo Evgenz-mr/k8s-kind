@@ -173,14 +173,14 @@ Invoke-Native { docker cp "${Node}:$manifest" $localManifest } 'Could not read k
 if (-not (Select-String -Path $localManifest -SimpleMatch $authFlag -Quiet)) {
     $patchFile = Join-Path $Generated 'patch-apiserver.yq'
     $patch = @'
-(.spec.containers[] | select(.name == 'kube-apiserver') | .args) += ['--authentication-config=/etc/kubernetes/kuber-authentication.yaml']
-.spec.volumes += [{name:'kuber-authn', hostPath:{path:'/etc/kubernetes/kuber-authentication.yaml', type:'File'}}]
-(.spec.containers[] | select(.name == 'kube-apiserver') | .volumeMounts) += [{name:'kuber-authn', mountPath:'/etc/kubernetes/kuber-authentication.yaml', readOnly:true}]
-.spec.hostAliases = ((.spec.hostAliases // []) + [{ip:'SERVICE_IP', hostnames:['keycloak.kuber.local', 'keycloak.kuber-system.svc', 'keycloak.kuber-system.svc.cluster.local']}])
+(.spec.containers[] | select(.name == "kube-apiserver") | .args) += ["--authentication-config=/etc/kubernetes/kuber-authentication.yaml"]
+.spec.volumes += [{"name":"kuber-authn","hostPath":{"path":"/etc/kubernetes/kuber-authentication.yaml","type":"File"}}]
+(.spec.containers[] | select(.name == "kube-apiserver") | .volumeMounts) += [{"name":"kuber-authn","mountPath":"/etc/kubernetes/kuber-authentication.yaml","readOnly":true}]
+.spec.hostAliases = ((.spec.hostAliases // []) + [{"ip":"SERVICE_IP","hostnames":["keycloak.kuber.local","keycloak.kuber-system.svc","keycloak.kuber-system.svc.cluster.local"]}])
 '@
     $patch.Replace('SERVICE_IP', $serviceIp) | Set-Content -Path $patchFile -Encoding ascii
     $expression = Get-Content $patchFile -Raw
-    Invoke-Native { yq eval --inplace $expression $localManifest } 'Could not patch kube-apiserver manifest for OIDC.'
+    Invoke-Native { yq eval --inplace --from-file $patchFile $localManifest } 'Could not patch kube-apiserver manifest for OIDC.'
     Invoke-Native { docker cp $localManifest "${Node}:$manifest" } 'Could not install the OIDC-enabled kube-apiserver manifest.'
 }
 for ($i = 0; $i -lt 60; $i++) {
