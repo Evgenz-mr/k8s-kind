@@ -112,13 +112,513 @@ if (-not (Test-Path $clientSecretFile)) {
 }
 $cookieEncryptionKeyFile = Join-Path $Generated 'cookie-encryption-key.txt'
 $cookieAuthenticationKeyFile = Join-Path $Generated 'cookie-authentication-key.txt'
-foreach ($keyFile in @($cookieEncryptionKeyFile, $cookieAuthenticationKeyFile)) {
-    if (-not (Test-Path $keyFile)) {
-        $cookieKey = (openssl rand -hex 32).Trim()
-        if ($LASTEXITCODE -ne 0 -or -not $cookieKey) { throw "Could not generate Console session key: $keyFile" }
-        Set-Content -Path $keyFile -Value $cookieKey -NoNewline -Encoding ascii
-        $cookieKey = $null
+$cookieEncryptionKey = if (Test-Path $cookieEncryptionKeyFile) { (Get-Content $cookieEncryptionKeyFile -Raw).Trim() } else { '' }
+if ($cookieEncryptionKey -notmatch '^[0-9a-f]{32}$adminPassword = ((Get-Content $adminFile | Where-Object { $_ -like 'password=*' }) -replace '^password=','')
+$clientSecret = (Get-Content $clientSecretFile -Raw).Trim()
+$realmFile = Join-Path $Generated 'kuber-realm.json'
+$realm = @{
+    realm = 'kuber'; enabled = $true
+    groups = @(@{ name = 'kuber-cluster-admins' }, @{ name = 'kuber-namespace-admins' })
+    clients = @(@{
+        clientId = 'kuber-console'; name = 'Kuber Console'; enabled = $true
+        protocol = 'openid-connect'; publicClient = $false; secret = $clientSecret
+        standardFlowEnabled = $true; directAccessGrantsEnabled = $false
+        redirectUris = @('http://localhost:9000/auth/callback')
+        webOrigins = @('http://localhost:9000')
+        protocolMappers = @(@{
+            name = 'groups'; protocol = 'openid-connect'; protocolMapper = 'oidc-group-membership-mapper'; consentRequired = $false
+            config = @{ 'claim.name'='groups'; 'full.path'='false'; 'id.token.claim'='true'; 'access.token.claim'='true'; 'userinfo.token.claim'='true' }
+        },@{
+            name = 'kuber-console-audience'; protocol = 'openid-connect'; protocolMapper = 'oidc-audience-mapper'; consentRequired = $false
+            config = @{ 'included.client.audience'='kuber-console'; 'id.token.claim'='true'; 'access.token.claim'='true' }
+        })
+    })
+}
+$realm | ConvertTo-Json -Depth 12 | Set-Content -Path $realmFile -Encoding ascii
+Invoke-Native { kubectl --context $Context -n $SystemNamespace create secret tls kuber-keycloak-tls --cert=$serverCrt --key=$serverKey --dry-run=client -o yaml | kubectl --context $Context apply -f - } 'Could not apply Keycloak TLS Secret.'
+Invoke-Native { kubectl --context $Context -n $SystemNamespace create secret generic kuber-keycloak-admin --from-literal=username=kcadmin --from-literal=password=$adminPassword --dry-run=client -o yaml | kubectl --context $Context apply -f - } 'Could not apply Keycloak administrator Secret.'
+Invoke-Native { kubectl --context $Context -n $SystemNamespace create secret generic kuber-oidc-ca --from-file=ca.crt=$caCrt --dry-run=client -o yaml | kubectl --context $Context apply -f - } 'Could not apply OIDC CA Secret.'
+Invoke-Native { kubectl --context $Context -n $SystemNamespace create secret generic kuber-oidc-client --from-literal=client-secret=$clientSecret --dry-run=client -o yaml | kubectl --context $Context apply -f - } 'Could not apply OIDC client Secret.'
+Invoke-Native { kubectl --context $Context -n $SystemNamespace create secret generic kuber-console-session --from-file=cookie-encryption-key=$cookieEncryptionKeyFile --from-file=cookie-authentication-key=$cookieAuthenticationKeyFile --dry-run=client -o yaml | kubectl --context $Context apply -f - } 'Could not apply Console session key Secret.'
+Invoke-Native { kubectl --context $Context -n $SystemNamespace create secret generic kuber-keycloak-realm --from-file=kuber-realm.json=$realmFile --dry-run=client -o yaml | kubectl --context $Context apply -f - } 'Could not apply Keycloak realm Secret.'
+$adminPassword = $null; $clientSecret = $null; $cookieEncryptionKey = $null; $cookieAuthenticationKey = $null; $realm = $null
+Invoke-Native { kubectl --context $Context apply -f (Join-Path $AppRoot 'oidc\keycloak-deployment.yaml') } 'Could not deploy Keycloak.'
+Invoke-Native { kubectl --context $Context -n $SystemNamespace rollout status deployment/kuber-keycloak --timeout=5m } 'Keycloak did not become ready.'
+
+Write-Host '[4/8] Preparing Kubernetes OIDC authentication configuration...'
+$pem = (Get-Content $caCrt -Raw).TrimEnd() -split "`r?`n" | ForEach-Object { "        $_" }
+$authConfig = Join-Path $Generated 'authentication.yaml'
+$auth = @"
+apiVersion: apiserver.config.k8s.io/v1
+kind: AuthenticationConfiguration
+jwt:
+  - issuer:
+      url: $ExternalIssuer
+      discoveryURL: https://keycloak.${SystemNamespace}.svc:9443/realms/kuber/.well-known/openid-configuration
+      certificateAuthority: |
+$($pem -join "`n")
+      audiences:
+        - kuber-console
+    claimMappings:
+      username:
+        claim: preferred_username
+        prefix: "oidc:"
+      groups:
+        claim: groups
+        prefix: "oidc:"
+"@
+Set-Content -Path $authConfig -Value $auth -Encoding ascii
+Invoke-Native { docker cp $authConfig "${Node}:/etc/kubernetes/kuber-authentication.yaml" } 'Could not copy OIDC AuthenticationConfiguration into the control-plane node.'
+$manifest = '/etc/kubernetes/manifests/kube-apiserver.yaml'
+$backup = "$manifest.kuber-backup"
+Invoke-Native { docker exec $Node sh -c "test -f $backup || cp $manifest $backup" } 'Could not back up the kube-apiserver static Pod manifest.'
+$localManifest = Join-Path $Generated 'kube-apiserver.yaml'
+Invoke-Native { docker cp "${Node}:$manifest" $localManifest } 'Could not read kube-apiserver static Pod manifest.'
+if (-not (Select-String -Path $localManifest -SimpleMatch $authFlag -Quiet)) {
+    $patchFile = Join-Path $Generated 'patch-apiserver.yq'
+    $patch = @'
+(.spec.containers[] | select(.name == "kube-apiserver") | .args) += ["--authentication-config=/etc/kubernetes/kuber-authentication.yaml"] |
+.spec.volumes += [{"name":"kuber-authn","hostPath":{"path":"/etc/kubernetes/kuber-authentication.yaml","type":"File"}}] |
+(.spec.containers[] | select(.name == "kube-apiserver") | .volumeMounts) += [{"name":"kuber-authn","mountPath":"/etc/kubernetes/kuber-authentication.yaml","readOnly":true}] |
+.spec.hostAliases = ((.spec.hostAliases // []) + [{"ip":"SERVICE_IP","hostnames":["keycloak.kuber.local","keycloak.kuber-system.svc","keycloak.kuber-system.svc.cluster.local"]}])
+'@
+    $patch.Replace('SERVICE_IP', $serviceIp) | Set-Content -Path $patchFile -Encoding ascii
+    $expression = Get-Content $patchFile -Raw
+    Invoke-Native { yq eval --inplace --from-file $patchFile $localManifest } 'Could not patch kube-apiserver manifest for OIDC.'
+    Invoke-Native { docker cp $localManifest "${Node}:$manifest" } 'Could not install the OIDC-enabled kube-apiserver manifest.'
+}
+$apiReady = $false
+for ($i = 0; $i -lt 60; $i++) {
+    try {
+        kubectl --context $Context get nodes 2>$null *> $null
+        if ($LASTEXITCODE -eq 0) { $apiReady = $true; break }
+    } catch {
+        # kubectl may briefly return EOF while the static kube-apiserver Pod restarts.
     }
+    Start-Sleep -Seconds 3
+}
+if (-not $apiReady) { throw 'Kubernetes API did not recover after the OIDC configuration change. Inspect kube-apiserver logs before retrying.' }
+Invoke-Native { kubectl --context $Context get nodes } 'Kubernetes API did not recover after the OIDC configuration change.'
+
+Write-Host '[5/8] Installing the Kuber Console chart (dashboard only; no ARGUS application stack)...'
+$valuesFile = Join-Path $Generated 'kuber-oidc-values.yaml'
+@"
+auth:
+  issuerUrl: $ExternalIssuer
+  issuerHostAlias: $serviceIp
+rbac:
+  namespace: $TargetNamespace
+"@ | Set-Content -Path $valuesFile -Encoding utf8
+Invoke-Native { helm upgrade --install kuber-console $AppRoot --kube-context $Context --namespace $SystemNamespace --create-namespace -f $valuesFile --wait --timeout 10m } 'Kuber Console Helm deployment failed.'
+Invoke-Native { kubectl --context $Context -n $SystemNamespace rollout status deployment/kuber-console --timeout=180s } 'Kuber Console did not become ready.'
+
+Write-Host '[6/8] Starting local-only port forwards for the login flow...'
+$logKeycloak = Join-Path $Generated 'keycloak-port-forward.log'
+$logConsole = Join-Path $Generated 'console-port-forward.log'
+$pfKeycloak = Start-Process -FilePath 'kubectl.exe' -ArgumentList @('--context',$Context,'-n',$SystemNamespace,'port-forward','svc/keycloak','9443:9443') -PassThru -WindowStyle Hidden -RedirectStandardOutput $logKeycloak -RedirectStandardError (Join-Path $Generated 'keycloak-port-forward.err')
+$pfConsole = Start-Process -FilePath 'kubectl.exe' -ArgumentList @('--context',$Context,'-n',$SystemNamespace,'port-forward','svc/kuber-console','9000:9000') -PassThru -WindowStyle Hidden -RedirectStandardOutput $logConsole -RedirectStandardError (Join-Path $Generated 'console-port-forward.err')
+Set-Content -Path (Join-Path $Generated 'port-forward-pids.txt') -Value "keycloak=$($pfKeycloak.Id)`nconsole=$($pfConsole.Id)" -Encoding ascii
+Start-Sleep -Seconds 3
+if ($pfKeycloak.HasExited -or $pfConsole.HasExited) { throw "A port-forward process exited. Check logs under $Generated" }
+Invoke-Native { curl.exe --fail --silent --show-error --cacert $caCrt --resolve keycloak.kuber.local:9443:127.0.0.1 https://keycloak.kuber.local:9443/realms/kuber/.well-known/openid-configuration -o (Join-Path $Generated 'oidc-discovery.json') } 'Keycloak OIDC discovery check failed.'
+Invoke-Native { curl.exe --fail --silent --show-error http://localhost:9000/ -o NUL } 'Kuber Console HTTP check failed.'
+
+Write-Host '[7/8] Running RBAC boundary checks...'
+$readPods = (kubectl --context $Context auth can-i get pods -n $TargetNamespace --as=oidc:e2e-ns-admin --as-group=oidc:kuber-namespace-admins).Trim()
+$deleteNs = (kubectl --context $Context auth can-i delete namespaces --as=oidc:e2e-ns-admin --as-group=oidc:kuber-namespace-admins).Trim()
+$readNodes = (kubectl --context $Context auth can-i get nodes --as=oidc:e2e-cluster-admin --as-group=oidc:kuber-cluster-admins).Trim()
+if ($readPods -ne 'yes' -or $deleteNs -ne 'no' -or $readNodes -ne 'yes') { throw "RBAC checks failed: get pods=$readPods; delete namespaces=$deleteNs; cluster admin get nodes=$readNodes" }
+
+Write-Host '[8/8] Deployment and smoke checks passed.'
+Write-Host "Keycloak admin credentials: $adminFile"
+Write-Host 'Add to Windows hosts file (as Administrator): 127.0.0.1 keycloak.kuber.local'
+Write-Host "Trust local CA (elevated PowerShell): certutil -addstore -f Root `"$caCrt`""
+Write-Host "Create users in Keycloak realm kuber and add each only to kuber-cluster-admins or kuber-namespace-admins. Namespace admins are scoped to $TargetNamespace."
+Write-Host 'Console: http://localhost:9000  |  Keycloak: https://keycloak.kuber.local:9443'
+Write-Host "Port-forward process IDs and logs: $Generated"
+Write-Host "Port-forward process IDs: $Generated\port-forward-pids.txt (stop only those PIDs with Stop-Process)."
+) {
+    $cookieEncryptionKey = (openssl rand -hex 16).Trim()
+    if ($LASTEXITCODE -ne 0 -or $cookieEncryptionKey -notmatch '^[0-9a-f]{32}$adminPassword = ((Get-Content $adminFile | Where-Object { $_ -like 'password=*' }) -replace '^password=','')
+$clientSecret = (Get-Content $clientSecretFile -Raw).Trim()
+$realmFile = Join-Path $Generated 'kuber-realm.json'
+$realm = @{
+    realm = 'kuber'; enabled = $true
+    groups = @(@{ name = 'kuber-cluster-admins' }, @{ name = 'kuber-namespace-admins' })
+    clients = @(@{
+        clientId = 'kuber-console'; name = 'Kuber Console'; enabled = $true
+        protocol = 'openid-connect'; publicClient = $false; secret = $clientSecret
+        standardFlowEnabled = $true; directAccessGrantsEnabled = $false
+        redirectUris = @('http://localhost:9000/auth/callback')
+        webOrigins = @('http://localhost:9000')
+        protocolMappers = @(@{
+            name = 'groups'; protocol = 'openid-connect'; protocolMapper = 'oidc-group-membership-mapper'; consentRequired = $false
+            config = @{ 'claim.name'='groups'; 'full.path'='false'; 'id.token.claim'='true'; 'access.token.claim'='true'; 'userinfo.token.claim'='true' }
+        },@{
+            name = 'kuber-console-audience'; protocol = 'openid-connect'; protocolMapper = 'oidc-audience-mapper'; consentRequired = $false
+            config = @{ 'included.client.audience'='kuber-console'; 'id.token.claim'='true'; 'access.token.claim'='true' }
+        })
+    })
+}
+$realm | ConvertTo-Json -Depth 12 | Set-Content -Path $realmFile -Encoding ascii
+Invoke-Native { kubectl --context $Context -n $SystemNamespace create secret tls kuber-keycloak-tls --cert=$serverCrt --key=$serverKey --dry-run=client -o yaml | kubectl --context $Context apply -f - } 'Could not apply Keycloak TLS Secret.'
+Invoke-Native { kubectl --context $Context -n $SystemNamespace create secret generic kuber-keycloak-admin --from-literal=username=kcadmin --from-literal=password=$adminPassword --dry-run=client -o yaml | kubectl --context $Context apply -f - } 'Could not apply Keycloak administrator Secret.'
+Invoke-Native { kubectl --context $Context -n $SystemNamespace create secret generic kuber-oidc-ca --from-file=ca.crt=$caCrt --dry-run=client -o yaml | kubectl --context $Context apply -f - } 'Could not apply OIDC CA Secret.'
+Invoke-Native { kubectl --context $Context -n $SystemNamespace create secret generic kuber-oidc-client --from-literal=client-secret=$clientSecret --dry-run=client -o yaml | kubectl --context $Context apply -f - } 'Could not apply OIDC client Secret.'
+Invoke-Native { kubectl --context $Context -n $SystemNamespace create secret generic kuber-console-session --from-file=cookie-encryption-key=$cookieEncryptionKeyFile --from-file=cookie-authentication-key=$cookieAuthenticationKeyFile --dry-run=client -o yaml | kubectl --context $Context apply -f - } 'Could not apply Console session key Secret.'
+Invoke-Native { kubectl --context $Context -n $SystemNamespace create secret generic kuber-keycloak-realm --from-file=kuber-realm.json=$realmFile --dry-run=client -o yaml | kubectl --context $Context apply -f - } 'Could not apply Keycloak realm Secret.'
+$adminPassword = $null; $clientSecret = $null; $cookieKey = $null; $realm = $null
+Invoke-Native { kubectl --context $Context apply -f (Join-Path $AppRoot 'oidc\keycloak-deployment.yaml') } 'Could not deploy Keycloak.'
+Invoke-Native { kubectl --context $Context -n $SystemNamespace rollout status deployment/kuber-keycloak --timeout=5m } 'Keycloak did not become ready.'
+
+Write-Host '[4/8] Preparing Kubernetes OIDC authentication configuration...'
+$pem = (Get-Content $caCrt -Raw).TrimEnd() -split "`r?`n" | ForEach-Object { "        $_" }
+$authConfig = Join-Path $Generated 'authentication.yaml'
+$auth = @"
+apiVersion: apiserver.config.k8s.io/v1
+kind: AuthenticationConfiguration
+jwt:
+  - issuer:
+      url: $ExternalIssuer
+      discoveryURL: https://keycloak.${SystemNamespace}.svc:9443/realms/kuber/.well-known/openid-configuration
+      certificateAuthority: |
+$($pem -join "`n")
+      audiences:
+        - kuber-console
+    claimMappings:
+      username:
+        claim: preferred_username
+        prefix: "oidc:"
+      groups:
+        claim: groups
+        prefix: "oidc:"
+"@
+Set-Content -Path $authConfig -Value $auth -Encoding ascii
+Invoke-Native { docker cp $authConfig "${Node}:/etc/kubernetes/kuber-authentication.yaml" } 'Could not copy OIDC AuthenticationConfiguration into the control-plane node.'
+$manifest = '/etc/kubernetes/manifests/kube-apiserver.yaml'
+$backup = "$manifest.kuber-backup"
+Invoke-Native { docker exec $Node sh -c "test -f $backup || cp $manifest $backup" } 'Could not back up the kube-apiserver static Pod manifest.'
+$localManifest = Join-Path $Generated 'kube-apiserver.yaml'
+Invoke-Native { docker cp "${Node}:$manifest" $localManifest } 'Could not read kube-apiserver static Pod manifest.'
+if (-not (Select-String -Path $localManifest -SimpleMatch $authFlag -Quiet)) {
+    $patchFile = Join-Path $Generated 'patch-apiserver.yq'
+    $patch = @'
+(.spec.containers[] | select(.name == "kube-apiserver") | .args) += ["--authentication-config=/etc/kubernetes/kuber-authentication.yaml"] |
+.spec.volumes += [{"name":"kuber-authn","hostPath":{"path":"/etc/kubernetes/kuber-authentication.yaml","type":"File"}}] |
+(.spec.containers[] | select(.name == "kube-apiserver") | .volumeMounts) += [{"name":"kuber-authn","mountPath":"/etc/kubernetes/kuber-authentication.yaml","readOnly":true}] |
+.spec.hostAliases = ((.spec.hostAliases // []) + [{"ip":"SERVICE_IP","hostnames":["keycloak.kuber.local","keycloak.kuber-system.svc","keycloak.kuber-system.svc.cluster.local"]}])
+'@
+    $patch.Replace('SERVICE_IP', $serviceIp) | Set-Content -Path $patchFile -Encoding ascii
+    $expression = Get-Content $patchFile -Raw
+    Invoke-Native { yq eval --inplace --from-file $patchFile $localManifest } 'Could not patch kube-apiserver manifest for OIDC.'
+    Invoke-Native { docker cp $localManifest "${Node}:$manifest" } 'Could not install the OIDC-enabled kube-apiserver manifest.'
+}
+$apiReady = $false
+for ($i = 0; $i -lt 60; $i++) {
+    try {
+        kubectl --context $Context get nodes 2>$null *> $null
+        if ($LASTEXITCODE -eq 0) { $apiReady = $true; break }
+    } catch {
+        # kubectl may briefly return EOF while the static kube-apiserver Pod restarts.
+    }
+    Start-Sleep -Seconds 3
+}
+if (-not $apiReady) { throw 'Kubernetes API did not recover after the OIDC configuration change. Inspect kube-apiserver logs before retrying.' }
+Invoke-Native { kubectl --context $Context get nodes } 'Kubernetes API did not recover after the OIDC configuration change.'
+
+Write-Host '[5/8] Installing the Kuber Console chart (dashboard only; no ARGUS application stack)...'
+$valuesFile = Join-Path $Generated 'kuber-oidc-values.yaml'
+@"
+auth:
+  issuerUrl: $ExternalIssuer
+  issuerHostAlias: $serviceIp
+rbac:
+  namespace: $TargetNamespace
+"@ | Set-Content -Path $valuesFile -Encoding utf8
+Invoke-Native { helm upgrade --install kuber-console $AppRoot --kube-context $Context --namespace $SystemNamespace --create-namespace -f $valuesFile --wait --timeout 10m } 'Kuber Console Helm deployment failed.'
+Invoke-Native { kubectl --context $Context -n $SystemNamespace rollout status deployment/kuber-console --timeout=180s } 'Kuber Console did not become ready.'
+
+Write-Host '[6/8] Starting local-only port forwards for the login flow...'
+$logKeycloak = Join-Path $Generated 'keycloak-port-forward.log'
+$logConsole = Join-Path $Generated 'console-port-forward.log'
+$pfKeycloak = Start-Process -FilePath 'kubectl.exe' -ArgumentList @('--context',$Context,'-n',$SystemNamespace,'port-forward','svc/keycloak','9443:9443') -PassThru -WindowStyle Hidden -RedirectStandardOutput $logKeycloak -RedirectStandardError (Join-Path $Generated 'keycloak-port-forward.err')
+$pfConsole = Start-Process -FilePath 'kubectl.exe' -ArgumentList @('--context',$Context,'-n',$SystemNamespace,'port-forward','svc/kuber-console','9000:9000') -PassThru -WindowStyle Hidden -RedirectStandardOutput $logConsole -RedirectStandardError (Join-Path $Generated 'console-port-forward.err')
+Set-Content -Path (Join-Path $Generated 'port-forward-pids.txt') -Value "keycloak=$($pfKeycloak.Id)`nconsole=$($pfConsole.Id)" -Encoding ascii
+Start-Sleep -Seconds 3
+if ($pfKeycloak.HasExited -or $pfConsole.HasExited) { throw "A port-forward process exited. Check logs under $Generated" }
+Invoke-Native { curl.exe --fail --silent --show-error --cacert $caCrt --resolve keycloak.kuber.local:9443:127.0.0.1 https://keycloak.kuber.local:9443/realms/kuber/.well-known/openid-configuration -o (Join-Path $Generated 'oidc-discovery.json') } 'Keycloak OIDC discovery check failed.'
+Invoke-Native { curl.exe --fail --silent --show-error http://localhost:9000/ -o NUL } 'Kuber Console HTTP check failed.'
+
+Write-Host '[7/8] Running RBAC boundary checks...'
+$readPods = (kubectl --context $Context auth can-i get pods -n $TargetNamespace --as=oidc:e2e-ns-admin --as-group=oidc:kuber-namespace-admins).Trim()
+$deleteNs = (kubectl --context $Context auth can-i delete namespaces --as=oidc:e2e-ns-admin --as-group=oidc:kuber-namespace-admins).Trim()
+$readNodes = (kubectl --context $Context auth can-i get nodes --as=oidc:e2e-cluster-admin --as-group=oidc:kuber-cluster-admins).Trim()
+if ($readPods -ne 'yes' -or $deleteNs -ne 'no' -or $readNodes -ne 'yes') { throw "RBAC checks failed: get pods=$readPods; delete namespaces=$deleteNs; cluster admin get nodes=$readNodes" }
+
+Write-Host '[8/8] Deployment and smoke checks passed.'
+Write-Host "Keycloak admin credentials: $adminFile"
+Write-Host 'Add to Windows hosts file (as Administrator): 127.0.0.1 keycloak.kuber.local'
+Write-Host "Trust local CA (elevated PowerShell): certutil -addstore -f Root `"$caCrt`""
+Write-Host "Create users in Keycloak realm kuber and add each only to kuber-cluster-admins or kuber-namespace-admins. Namespace admins are scoped to $TargetNamespace."
+Write-Host 'Console: http://localhost:9000  |  Keycloak: https://keycloak.kuber.local:9443'
+Write-Host "Port-forward process IDs and logs: $Generated"
+Write-Host "Port-forward process IDs: $Generated\port-forward-pids.txt (stop only those PIDs with Stop-Process)."
+) { throw 'Could not generate a valid 32-character Console cookie encryption key.' }
+    Set-Content -Path $cookieEncryptionKeyFile -Value $cookieEncryptionKey -NoNewline -Encoding ascii
+}
+$cookieAuthenticationKey = if (Test-Path $cookieAuthenticationKeyFile) { (Get-Content $cookieAuthenticationKeyFile -Raw).Trim() } else { '' }
+if ($cookieAuthenticationKey -notmatch '^[0-9a-f]{64}$adminPassword = ((Get-Content $adminFile | Where-Object { $_ -like 'password=*' }) -replace '^password=','')
+$clientSecret = (Get-Content $clientSecretFile -Raw).Trim()
+$realmFile = Join-Path $Generated 'kuber-realm.json'
+$realm = @{
+    realm = 'kuber'; enabled = $true
+    groups = @(@{ name = 'kuber-cluster-admins' }, @{ name = 'kuber-namespace-admins' })
+    clients = @(@{
+        clientId = 'kuber-console'; name = 'Kuber Console'; enabled = $true
+        protocol = 'openid-connect'; publicClient = $false; secret = $clientSecret
+        standardFlowEnabled = $true; directAccessGrantsEnabled = $false
+        redirectUris = @('http://localhost:9000/auth/callback')
+        webOrigins = @('http://localhost:9000')
+        protocolMappers = @(@{
+            name = 'groups'; protocol = 'openid-connect'; protocolMapper = 'oidc-group-membership-mapper'; consentRequired = $false
+            config = @{ 'claim.name'='groups'; 'full.path'='false'; 'id.token.claim'='true'; 'access.token.claim'='true'; 'userinfo.token.claim'='true' }
+        },@{
+            name = 'kuber-console-audience'; protocol = 'openid-connect'; protocolMapper = 'oidc-audience-mapper'; consentRequired = $false
+            config = @{ 'included.client.audience'='kuber-console'; 'id.token.claim'='true'; 'access.token.claim'='true' }
+        })
+    })
+}
+$realm | ConvertTo-Json -Depth 12 | Set-Content -Path $realmFile -Encoding ascii
+Invoke-Native { kubectl --context $Context -n $SystemNamespace create secret tls kuber-keycloak-tls --cert=$serverCrt --key=$serverKey --dry-run=client -o yaml | kubectl --context $Context apply -f - } 'Could not apply Keycloak TLS Secret.'
+Invoke-Native { kubectl --context $Context -n $SystemNamespace create secret generic kuber-keycloak-admin --from-literal=username=kcadmin --from-literal=password=$adminPassword --dry-run=client -o yaml | kubectl --context $Context apply -f - } 'Could not apply Keycloak administrator Secret.'
+Invoke-Native { kubectl --context $Context -n $SystemNamespace create secret generic kuber-oidc-ca --from-file=ca.crt=$caCrt --dry-run=client -o yaml | kubectl --context $Context apply -f - } 'Could not apply OIDC CA Secret.'
+Invoke-Native { kubectl --context $Context -n $SystemNamespace create secret generic kuber-oidc-client --from-literal=client-secret=$clientSecret --dry-run=client -o yaml | kubectl --context $Context apply -f - } 'Could not apply OIDC client Secret.'
+Invoke-Native { kubectl --context $Context -n $SystemNamespace create secret generic kuber-console-session --from-file=cookie-encryption-key=$cookieEncryptionKeyFile --from-file=cookie-authentication-key=$cookieAuthenticationKeyFile --dry-run=client -o yaml | kubectl --context $Context apply -f - } 'Could not apply Console session key Secret.'
+Invoke-Native { kubectl --context $Context -n $SystemNamespace create secret generic kuber-keycloak-realm --from-file=kuber-realm.json=$realmFile --dry-run=client -o yaml | kubectl --context $Context apply -f - } 'Could not apply Keycloak realm Secret.'
+$adminPassword = $null; $clientSecret = $null; $cookieKey = $null; $realm = $null
+Invoke-Native { kubectl --context $Context apply -f (Join-Path $AppRoot 'oidc\keycloak-deployment.yaml') } 'Could not deploy Keycloak.'
+Invoke-Native { kubectl --context $Context -n $SystemNamespace rollout status deployment/kuber-keycloak --timeout=5m } 'Keycloak did not become ready.'
+
+Write-Host '[4/8] Preparing Kubernetes OIDC authentication configuration...'
+$pem = (Get-Content $caCrt -Raw).TrimEnd() -split "`r?`n" | ForEach-Object { "        $_" }
+$authConfig = Join-Path $Generated 'authentication.yaml'
+$auth = @"
+apiVersion: apiserver.config.k8s.io/v1
+kind: AuthenticationConfiguration
+jwt:
+  - issuer:
+      url: $ExternalIssuer
+      discoveryURL: https://keycloak.${SystemNamespace}.svc:9443/realms/kuber/.well-known/openid-configuration
+      certificateAuthority: |
+$($pem -join "`n")
+      audiences:
+        - kuber-console
+    claimMappings:
+      username:
+        claim: preferred_username
+        prefix: "oidc:"
+      groups:
+        claim: groups
+        prefix: "oidc:"
+"@
+Set-Content -Path $authConfig -Value $auth -Encoding ascii
+Invoke-Native { docker cp $authConfig "${Node}:/etc/kubernetes/kuber-authentication.yaml" } 'Could not copy OIDC AuthenticationConfiguration into the control-plane node.'
+$manifest = '/etc/kubernetes/manifests/kube-apiserver.yaml'
+$backup = "$manifest.kuber-backup"
+Invoke-Native { docker exec $Node sh -c "test -f $backup || cp $manifest $backup" } 'Could not back up the kube-apiserver static Pod manifest.'
+$localManifest = Join-Path $Generated 'kube-apiserver.yaml'
+Invoke-Native { docker cp "${Node}:$manifest" $localManifest } 'Could not read kube-apiserver static Pod manifest.'
+if (-not (Select-String -Path $localManifest -SimpleMatch $authFlag -Quiet)) {
+    $patchFile = Join-Path $Generated 'patch-apiserver.yq'
+    $patch = @'
+(.spec.containers[] | select(.name == "kube-apiserver") | .args) += ["--authentication-config=/etc/kubernetes/kuber-authentication.yaml"] |
+.spec.volumes += [{"name":"kuber-authn","hostPath":{"path":"/etc/kubernetes/kuber-authentication.yaml","type":"File"}}] |
+(.spec.containers[] | select(.name == "kube-apiserver") | .volumeMounts) += [{"name":"kuber-authn","mountPath":"/etc/kubernetes/kuber-authentication.yaml","readOnly":true}] |
+.spec.hostAliases = ((.spec.hostAliases // []) + [{"ip":"SERVICE_IP","hostnames":["keycloak.kuber.local","keycloak.kuber-system.svc","keycloak.kuber-system.svc.cluster.local"]}])
+'@
+    $patch.Replace('SERVICE_IP', $serviceIp) | Set-Content -Path $patchFile -Encoding ascii
+    $expression = Get-Content $patchFile -Raw
+    Invoke-Native { yq eval --inplace --from-file $patchFile $localManifest } 'Could not patch kube-apiserver manifest for OIDC.'
+    Invoke-Native { docker cp $localManifest "${Node}:$manifest" } 'Could not install the OIDC-enabled kube-apiserver manifest.'
+}
+$apiReady = $false
+for ($i = 0; $i -lt 60; $i++) {
+    try {
+        kubectl --context $Context get nodes 2>$null *> $null
+        if ($LASTEXITCODE -eq 0) { $apiReady = $true; break }
+    } catch {
+        # kubectl may briefly return EOF while the static kube-apiserver Pod restarts.
+    }
+    Start-Sleep -Seconds 3
+}
+if (-not $apiReady) { throw 'Kubernetes API did not recover after the OIDC configuration change. Inspect kube-apiserver logs before retrying.' }
+Invoke-Native { kubectl --context $Context get nodes } 'Kubernetes API did not recover after the OIDC configuration change.'
+
+Write-Host '[5/8] Installing the Kuber Console chart (dashboard only; no ARGUS application stack)...'
+$valuesFile = Join-Path $Generated 'kuber-oidc-values.yaml'
+@"
+auth:
+  issuerUrl: $ExternalIssuer
+  issuerHostAlias: $serviceIp
+rbac:
+  namespace: $TargetNamespace
+"@ | Set-Content -Path $valuesFile -Encoding utf8
+Invoke-Native { helm upgrade --install kuber-console $AppRoot --kube-context $Context --namespace $SystemNamespace --create-namespace -f $valuesFile --wait --timeout 10m } 'Kuber Console Helm deployment failed.'
+Invoke-Native { kubectl --context $Context -n $SystemNamespace rollout status deployment/kuber-console --timeout=180s } 'Kuber Console did not become ready.'
+
+Write-Host '[6/8] Starting local-only port forwards for the login flow...'
+$logKeycloak = Join-Path $Generated 'keycloak-port-forward.log'
+$logConsole = Join-Path $Generated 'console-port-forward.log'
+$pfKeycloak = Start-Process -FilePath 'kubectl.exe' -ArgumentList @('--context',$Context,'-n',$SystemNamespace,'port-forward','svc/keycloak','9443:9443') -PassThru -WindowStyle Hidden -RedirectStandardOutput $logKeycloak -RedirectStandardError (Join-Path $Generated 'keycloak-port-forward.err')
+$pfConsole = Start-Process -FilePath 'kubectl.exe' -ArgumentList @('--context',$Context,'-n',$SystemNamespace,'port-forward','svc/kuber-console','9000:9000') -PassThru -WindowStyle Hidden -RedirectStandardOutput $logConsole -RedirectStandardError (Join-Path $Generated 'console-port-forward.err')
+Set-Content -Path (Join-Path $Generated 'port-forward-pids.txt') -Value "keycloak=$($pfKeycloak.Id)`nconsole=$($pfConsole.Id)" -Encoding ascii
+Start-Sleep -Seconds 3
+if ($pfKeycloak.HasExited -or $pfConsole.HasExited) { throw "A port-forward process exited. Check logs under $Generated" }
+Invoke-Native { curl.exe --fail --silent --show-error --cacert $caCrt --resolve keycloak.kuber.local:9443:127.0.0.1 https://keycloak.kuber.local:9443/realms/kuber/.well-known/openid-configuration -o (Join-Path $Generated 'oidc-discovery.json') } 'Keycloak OIDC discovery check failed.'
+Invoke-Native { curl.exe --fail --silent --show-error http://localhost:9000/ -o NUL } 'Kuber Console HTTP check failed.'
+
+Write-Host '[7/8] Running RBAC boundary checks...'
+$readPods = (kubectl --context $Context auth can-i get pods -n $TargetNamespace --as=oidc:e2e-ns-admin --as-group=oidc:kuber-namespace-admins).Trim()
+$deleteNs = (kubectl --context $Context auth can-i delete namespaces --as=oidc:e2e-ns-admin --as-group=oidc:kuber-namespace-admins).Trim()
+$readNodes = (kubectl --context $Context auth can-i get nodes --as=oidc:e2e-cluster-admin --as-group=oidc:kuber-cluster-admins).Trim()
+if ($readPods -ne 'yes' -or $deleteNs -ne 'no' -or $readNodes -ne 'yes') { throw "RBAC checks failed: get pods=$readPods; delete namespaces=$deleteNs; cluster admin get nodes=$readNodes" }
+
+Write-Host '[8/8] Deployment and smoke checks passed.'
+Write-Host "Keycloak admin credentials: $adminFile"
+Write-Host 'Add to Windows hosts file (as Administrator): 127.0.0.1 keycloak.kuber.local'
+Write-Host "Trust local CA (elevated PowerShell): certutil -addstore -f Root `"$caCrt`""
+Write-Host "Create users in Keycloak realm kuber and add each only to kuber-cluster-admins or kuber-namespace-admins. Namespace admins are scoped to $TargetNamespace."
+Write-Host 'Console: http://localhost:9000  |  Keycloak: https://keycloak.kuber.local:9443'
+Write-Host "Port-forward process IDs and logs: $Generated"
+Write-Host "Port-forward process IDs: $Generated\port-forward-pids.txt (stop only those PIDs with Stop-Process)."
+) {
+    $cookieAuthenticationKey = (openssl rand -hex 32).Trim()
+    if ($LASTEXITCODE -ne 0 -or $cookieAuthenticationKey -notmatch '^[0-9a-f]{64}$adminPassword = ((Get-Content $adminFile | Where-Object { $_ -like 'password=*' }) -replace '^password=','')
+$clientSecret = (Get-Content $clientSecretFile -Raw).Trim()
+$realmFile = Join-Path $Generated 'kuber-realm.json'
+$realm = @{
+    realm = 'kuber'; enabled = $true
+    groups = @(@{ name = 'kuber-cluster-admins' }, @{ name = 'kuber-namespace-admins' })
+    clients = @(@{
+        clientId = 'kuber-console'; name = 'Kuber Console'; enabled = $true
+        protocol = 'openid-connect'; publicClient = $false; secret = $clientSecret
+        standardFlowEnabled = $true; directAccessGrantsEnabled = $false
+        redirectUris = @('http://localhost:9000/auth/callback')
+        webOrigins = @('http://localhost:9000')
+        protocolMappers = @(@{
+            name = 'groups'; protocol = 'openid-connect'; protocolMapper = 'oidc-group-membership-mapper'; consentRequired = $false
+            config = @{ 'claim.name'='groups'; 'full.path'='false'; 'id.token.claim'='true'; 'access.token.claim'='true'; 'userinfo.token.claim'='true' }
+        },@{
+            name = 'kuber-console-audience'; protocol = 'openid-connect'; protocolMapper = 'oidc-audience-mapper'; consentRequired = $false
+            config = @{ 'included.client.audience'='kuber-console'; 'id.token.claim'='true'; 'access.token.claim'='true' }
+        })
+    })
+}
+$realm | ConvertTo-Json -Depth 12 | Set-Content -Path $realmFile -Encoding ascii
+Invoke-Native { kubectl --context $Context -n $SystemNamespace create secret tls kuber-keycloak-tls --cert=$serverCrt --key=$serverKey --dry-run=client -o yaml | kubectl --context $Context apply -f - } 'Could not apply Keycloak TLS Secret.'
+Invoke-Native { kubectl --context $Context -n $SystemNamespace create secret generic kuber-keycloak-admin --from-literal=username=kcadmin --from-literal=password=$adminPassword --dry-run=client -o yaml | kubectl --context $Context apply -f - } 'Could not apply Keycloak administrator Secret.'
+Invoke-Native { kubectl --context $Context -n $SystemNamespace create secret generic kuber-oidc-ca --from-file=ca.crt=$caCrt --dry-run=client -o yaml | kubectl --context $Context apply -f - } 'Could not apply OIDC CA Secret.'
+Invoke-Native { kubectl --context $Context -n $SystemNamespace create secret generic kuber-oidc-client --from-literal=client-secret=$clientSecret --dry-run=client -o yaml | kubectl --context $Context apply -f - } 'Could not apply OIDC client Secret.'
+Invoke-Native { kubectl --context $Context -n $SystemNamespace create secret generic kuber-console-session --from-file=cookie-encryption-key=$cookieEncryptionKeyFile --from-file=cookie-authentication-key=$cookieAuthenticationKeyFile --dry-run=client -o yaml | kubectl --context $Context apply -f - } 'Could not apply Console session key Secret.'
+Invoke-Native { kubectl --context $Context -n $SystemNamespace create secret generic kuber-keycloak-realm --from-file=kuber-realm.json=$realmFile --dry-run=client -o yaml | kubectl --context $Context apply -f - } 'Could not apply Keycloak realm Secret.'
+$adminPassword = $null; $clientSecret = $null; $cookieKey = $null; $realm = $null
+Invoke-Native { kubectl --context $Context apply -f (Join-Path $AppRoot 'oidc\keycloak-deployment.yaml') } 'Could not deploy Keycloak.'
+Invoke-Native { kubectl --context $Context -n $SystemNamespace rollout status deployment/kuber-keycloak --timeout=5m } 'Keycloak did not become ready.'
+
+Write-Host '[4/8] Preparing Kubernetes OIDC authentication configuration...'
+$pem = (Get-Content $caCrt -Raw).TrimEnd() -split "`r?`n" | ForEach-Object { "        $_" }
+$authConfig = Join-Path $Generated 'authentication.yaml'
+$auth = @"
+apiVersion: apiserver.config.k8s.io/v1
+kind: AuthenticationConfiguration
+jwt:
+  - issuer:
+      url: $ExternalIssuer
+      discoveryURL: https://keycloak.${SystemNamespace}.svc:9443/realms/kuber/.well-known/openid-configuration
+      certificateAuthority: |
+$($pem -join "`n")
+      audiences:
+        - kuber-console
+    claimMappings:
+      username:
+        claim: preferred_username
+        prefix: "oidc:"
+      groups:
+        claim: groups
+        prefix: "oidc:"
+"@
+Set-Content -Path $authConfig -Value $auth -Encoding ascii
+Invoke-Native { docker cp $authConfig "${Node}:/etc/kubernetes/kuber-authentication.yaml" } 'Could not copy OIDC AuthenticationConfiguration into the control-plane node.'
+$manifest = '/etc/kubernetes/manifests/kube-apiserver.yaml'
+$backup = "$manifest.kuber-backup"
+Invoke-Native { docker exec $Node sh -c "test -f $backup || cp $manifest $backup" } 'Could not back up the kube-apiserver static Pod manifest.'
+$localManifest = Join-Path $Generated 'kube-apiserver.yaml'
+Invoke-Native { docker cp "${Node}:$manifest" $localManifest } 'Could not read kube-apiserver static Pod manifest.'
+if (-not (Select-String -Path $localManifest -SimpleMatch $authFlag -Quiet)) {
+    $patchFile = Join-Path $Generated 'patch-apiserver.yq'
+    $patch = @'
+(.spec.containers[] | select(.name == "kube-apiserver") | .args) += ["--authentication-config=/etc/kubernetes/kuber-authentication.yaml"] |
+.spec.volumes += [{"name":"kuber-authn","hostPath":{"path":"/etc/kubernetes/kuber-authentication.yaml","type":"File"}}] |
+(.spec.containers[] | select(.name == "kube-apiserver") | .volumeMounts) += [{"name":"kuber-authn","mountPath":"/etc/kubernetes/kuber-authentication.yaml","readOnly":true}] |
+.spec.hostAliases = ((.spec.hostAliases // []) + [{"ip":"SERVICE_IP","hostnames":["keycloak.kuber.local","keycloak.kuber-system.svc","keycloak.kuber-system.svc.cluster.local"]}])
+'@
+    $patch.Replace('SERVICE_IP', $serviceIp) | Set-Content -Path $patchFile -Encoding ascii
+    $expression = Get-Content $patchFile -Raw
+    Invoke-Native { yq eval --inplace --from-file $patchFile $localManifest } 'Could not patch kube-apiserver manifest for OIDC.'
+    Invoke-Native { docker cp $localManifest "${Node}:$manifest" } 'Could not install the OIDC-enabled kube-apiserver manifest.'
+}
+$apiReady = $false
+for ($i = 0; $i -lt 60; $i++) {
+    try {
+        kubectl --context $Context get nodes 2>$null *> $null
+        if ($LASTEXITCODE -eq 0) { $apiReady = $true; break }
+    } catch {
+        # kubectl may briefly return EOF while the static kube-apiserver Pod restarts.
+    }
+    Start-Sleep -Seconds 3
+}
+if (-not $apiReady) { throw 'Kubernetes API did not recover after the OIDC configuration change. Inspect kube-apiserver logs before retrying.' }
+Invoke-Native { kubectl --context $Context get nodes } 'Kubernetes API did not recover after the OIDC configuration change.'
+
+Write-Host '[5/8] Installing the Kuber Console chart (dashboard only; no ARGUS application stack)...'
+$valuesFile = Join-Path $Generated 'kuber-oidc-values.yaml'
+@"
+auth:
+  issuerUrl: $ExternalIssuer
+  issuerHostAlias: $serviceIp
+rbac:
+  namespace: $TargetNamespace
+"@ | Set-Content -Path $valuesFile -Encoding utf8
+Invoke-Native { helm upgrade --install kuber-console $AppRoot --kube-context $Context --namespace $SystemNamespace --create-namespace -f $valuesFile --wait --timeout 10m } 'Kuber Console Helm deployment failed.'
+Invoke-Native { kubectl --context $Context -n $SystemNamespace rollout status deployment/kuber-console --timeout=180s } 'Kuber Console did not become ready.'
+
+Write-Host '[6/8] Starting local-only port forwards for the login flow...'
+$logKeycloak = Join-Path $Generated 'keycloak-port-forward.log'
+$logConsole = Join-Path $Generated 'console-port-forward.log'
+$pfKeycloak = Start-Process -FilePath 'kubectl.exe' -ArgumentList @('--context',$Context,'-n',$SystemNamespace,'port-forward','svc/keycloak','9443:9443') -PassThru -WindowStyle Hidden -RedirectStandardOutput $logKeycloak -RedirectStandardError (Join-Path $Generated 'keycloak-port-forward.err')
+$pfConsole = Start-Process -FilePath 'kubectl.exe' -ArgumentList @('--context',$Context,'-n',$SystemNamespace,'port-forward','svc/kuber-console','9000:9000') -PassThru -WindowStyle Hidden -RedirectStandardOutput $logConsole -RedirectStandardError (Join-Path $Generated 'console-port-forward.err')
+Set-Content -Path (Join-Path $Generated 'port-forward-pids.txt') -Value "keycloak=$($pfKeycloak.Id)`nconsole=$($pfConsole.Id)" -Encoding ascii
+Start-Sleep -Seconds 3
+if ($pfKeycloak.HasExited -or $pfConsole.HasExited) { throw "A port-forward process exited. Check logs under $Generated" }
+Invoke-Native { curl.exe --fail --silent --show-error --cacert $caCrt --resolve keycloak.kuber.local:9443:127.0.0.1 https://keycloak.kuber.local:9443/realms/kuber/.well-known/openid-configuration -o (Join-Path $Generated 'oidc-discovery.json') } 'Keycloak OIDC discovery check failed.'
+Invoke-Native { curl.exe --fail --silent --show-error http://localhost:9000/ -o NUL } 'Kuber Console HTTP check failed.'
+
+Write-Host '[7/8] Running RBAC boundary checks...'
+$readPods = (kubectl --context $Context auth can-i get pods -n $TargetNamespace --as=oidc:e2e-ns-admin --as-group=oidc:kuber-namespace-admins).Trim()
+$deleteNs = (kubectl --context $Context auth can-i delete namespaces --as=oidc:e2e-ns-admin --as-group=oidc:kuber-namespace-admins).Trim()
+$readNodes = (kubectl --context $Context auth can-i get nodes --as=oidc:e2e-cluster-admin --as-group=oidc:kuber-cluster-admins).Trim()
+if ($readPods -ne 'yes' -or $deleteNs -ne 'no' -or $readNodes -ne 'yes') { throw "RBAC checks failed: get pods=$readPods; delete namespaces=$deleteNs; cluster admin get nodes=$readNodes" }
+
+Write-Host '[8/8] Deployment and smoke checks passed.'
+Write-Host "Keycloak admin credentials: $adminFile"
+Write-Host 'Add to Windows hosts file (as Administrator): 127.0.0.1 keycloak.kuber.local'
+Write-Host "Trust local CA (elevated PowerShell): certutil -addstore -f Root `"$caCrt`""
+Write-Host "Create users in Keycloak realm kuber and add each only to kuber-cluster-admins or kuber-namespace-admins. Namespace admins are scoped to $TargetNamespace."
+Write-Host 'Console: http://localhost:9000  |  Keycloak: https://keycloak.kuber.local:9443'
+Write-Host "Port-forward process IDs and logs: $Generated"
+Write-Host "Port-forward process IDs: $Generated\port-forward-pids.txt (stop only those PIDs with Stop-Process)."
+) { throw 'Could not generate a valid 64-character Console cookie authentication key.' }
+    Set-Content -Path $cookieAuthenticationKeyFile -Value $cookieAuthenticationKey -NoNewline -Encoding ascii
 }
 $adminPassword = ((Get-Content $adminFile | Where-Object { $_ -like 'password=*' }) -replace '^password=','')
 $clientSecret = (Get-Content $clientSecretFile -Raw).Trim()
