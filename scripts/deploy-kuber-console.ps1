@@ -222,7 +222,7 @@ if (-not (Select-String -Path $localManifest -SimpleMatch $authFlag -Quiet)) {
     Invoke-Native { yq eval --inplace --from-file $patchFile $localManifest } 'Could not patch kube-apiserver manifest for OIDC.'
     Invoke-Native { docker cp $localManifest "${Node}:$manifest" } 'Could not install the OIDC-enabled kube-apiserver manifest.'
 }
-if ($rotateCa) {
+if ($rotateCa -and $existingAuthConfig) {
     $rotationId = [guid]::NewGuid().ToString()
     $rotationExpr = '.metadata.annotations."kuber.local/oidc-ca-rotation" = "' + $rotationId + '"'
     Invoke-Native { yq eval --inplace $rotationExpr $localManifest } 'Could not mark kube-apiserver for OIDC CA rotation.'
