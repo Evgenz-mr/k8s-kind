@@ -31,7 +31,7 @@ if($consoleArgs -notcontains '--public-dir=/opt/bridge/static'){throw 'Console d
 if($consoleArgs -notcontains '--cookie-encryption-key-file=/var/run/kuber-session/cookie-encryption-key' -or $consoleArgs -notcontains '--cookie-authentication-key-file=/var/run/kuber-session/cookie-authentication-key'){throw 'Console deployment is missing required OIDC cookie key flags.'}
 
 Write-Host '[4/7] OIDC discovery issuer and TLS'
-$discovery=curl.exe --fail --silent --show-error --cacert $ca --resolve keycloak.kuber.local:9443:127.0.0.1 https://keycloak.kuber.local:9443/realms/kuber/.well-known/openid-configuration | ConvertFrom-Json
+$discovery=curl.exe --ssl-no-revoke --fail --silent --show-error --cacert $ca --resolve keycloak.kuber.local:9443:127.0.0.1 https://keycloak.kuber.local:9443/realms/kuber/.well-known/openid-configuration | ConvertFrom-Json
 if($LASTEXITCODE -ne 0 -or $discovery.issuer -ne 'https://keycloak.kuber.local:9443/realms/kuber'){throw "OIDC discovery mismatch: $($discovery.issuer)"}
 
 Write-Host '[5/7] Dashboard HTTP endpoint'
