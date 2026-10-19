@@ -112,6 +112,8 @@ spec:
             - --user-auth-oidc-client-id={{ .Values.auth.clientId }}
             - --user-auth-oidc-client-secret-file=/var/run/kuber-oidc/client-secret
             - --user-auth-oidc-ca-file=/var/run/kuber-oidc-ca/ca.crt
+            - --cookie-encryption-key-file=/var/run/kuber-session/cookie-encryption-key
+            - --cookie-authentication-key-file=/var/run/kuber-session/cookie-authentication-key
           ports:
             - name: http
               containerPort: 9000
@@ -148,6 +150,9 @@ spec:
             - name: oidc-ca
               mountPath: /var/run/kuber-oidc-ca
               readOnly: true
+            - name: session-keys
+              mountPath: /var/run/kuber-session
+              readOnly: true
       volumes:
         - name: branding
           configMap:
@@ -164,6 +169,14 @@ spec:
             items:
               - key: {{ .Values.auth.caSecretKey }}
                 path: ca.crt
+        - name: session-keys
+          secret:
+            secretName: kuber-console-session
+            items:
+              - key: cookie-encryption-key
+                path: cookie-encryption-key
+              - key: cookie-authentication-key
+                path: cookie-authentication-key
 ---
 apiVersion: v1
 kind: Service
