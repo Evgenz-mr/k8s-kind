@@ -97,8 +97,9 @@ spec:
         - name: console
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          args:
+          command:
             - /opt/bridge/bin/bridge
+          args:
             - --listen=http://0.0.0.0:9000
             - --k8s-mode=in-cluster
             - --branding=okd
