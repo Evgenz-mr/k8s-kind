@@ -68,6 +68,51 @@ jobs:
           kubectl -n kyverno get pods
           kubectl get clusterissuer lab-selfsigned
           curl --retry 10 --retry-delay 2 --retry-connrefused -fsS -H 'Host: dashboard.localhost' http://127.0.0.1:8080/ >/dev/null
+      - name: Verify Prometheus scrapes kube-state-metrics
+        shell: bash
+        run: |
+          log_file=$(mktemp)
+          kubectl --context kind-ai-k8s -n monitoring port-forward \
+            --address 127.0.0.1 svc/prometheus-operated 19090:9090 >"$log_file" 2>&1 &
+          forward_pid=$!
+          cleanup() {
+            kill "$forward_pid" 2>/dev/null || true
+            wait "$forward_pid" 2>/dev/null || true
+            rm -f "$log_file"
+          }
+          trap cleanup EXIT
+
+          deadline=$((SECONDS + 120))
+          api_responded=false
+          while (( SECONDS < deadline )); do
+            if ! kill -0 "$forward_pid" 2>/dev/null; then
+              cat "$log_file" >&2
+              echo "Prometheus port-forward stopped" >&2
+              exit 1
+            fi
+            if response=$(curl -fsS --max-time 5 -G \
+              http://127.0.0.1:19090/api/v1/query \
+              --data-urlencode 'query=kube_state_metrics_build_info' 2>/dev/null); then
+              if jq -e '.status == "success" and .data.resultType == "vector"' \
+                <<< "$response" >/dev/null; then
+                api_responded=true
+                if jq -e '.data.result | any(.value[1] == "1")' \
+                  <<< "$response" >/dev/null; then
+                  echo "Prometheus has scraped kube-state-metrics"
+                  exit 0
+                fi
+              fi
+            fi
+            sleep 2
+          done
+
+          if [[ "$api_responded" == true ]]; then
+            echo "Prometheus returned no kube_state_metrics_build_info sample with value 1" >&2
+          else
+            echo "Prometheus query API did not return a valid response" >&2
+            cat "$log_file" >&2
+          fi
+          exit 1
       - name: Full diagnostics
         if: always()
         run: |
